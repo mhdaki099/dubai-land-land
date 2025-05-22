@@ -3,12 +3,12 @@ crewai
 langchain
 langchain-openai
 openai
-python-dotenv==1.0.0
-pandas==2.1.0
+python-dotenv
+pandas
 openpyxl
 scikit-learn
 faiss-cpu
 streamlit-chat
 plotly
 numpy
-matplotlib==3.7.2
+matplotlib
