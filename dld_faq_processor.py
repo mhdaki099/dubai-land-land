@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class DLDFAQProcessor:
     """Process DLD FAQ Excel files with the specific structure identified."""
     
-    def __init__(self, data_dir="S\data", output_dir="processed_data"):
+    def __init__(self, data_dir="data", output_dir="processed_data"):
         """Initialize the processor."""
         self.data_dir = data_dir
         self.output_dir = output_dir
