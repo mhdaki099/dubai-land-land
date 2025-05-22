@@ -58,7 +58,7 @@ def run_app():
         return False
     
     logging.info("Starting Streamlit application...")
-    os.system("streamlit run S/dld_chatbot_app.py")
+    os.system("streamlit run dld_chatbot_app.py")
     return True
 
 def print_usage():
