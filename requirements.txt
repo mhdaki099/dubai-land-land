@@ -5,3 +5,5 @@ pandas
 openpyxl
 numpy
 regex
+faiss-cpu
+scikit-learn
