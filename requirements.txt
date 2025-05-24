@@ -3,8 +3,5 @@ openai
 python-dotenv
 pandas
 openpyxl
-scikit-learn
-faiss-cpu
 numpy
-matplotlib
 regex
