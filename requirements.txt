@@ -1,11 +1,10 @@
 streamlit
 openai
-python-doten
+python-dotenv
 pandas
 openpyxl
 scikit-learn
 faiss-cpu
-streamlit-cha
-plotly
 numpy
 matplotlib
+regex
