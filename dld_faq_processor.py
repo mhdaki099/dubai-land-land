@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class DLDFAQProcessor:
     """Process DLD FAQ Excel files with the specific structure identified."""
     
-    def __init__(self, data_dir="S\data", output_dir="processed_data"):
+    def __init__(self, data_dir="data", output_dir="processed_data"):  # Fixed: removed "S\" prefix
         """Initialize the processor."""
         self.data_dir = data_dir
         self.output_dir = output_dir
@@ -34,8 +34,8 @@ class DLDFAQProcessor:
             os.makedirs(self.output_dir)
 
         if not os.path.exists(self.data_dir):
-            logging.error(os.listdir())
             logging.error(f"Data directory {self.data_dir} does not exist")
+            logging.error(f"Available directories: {os.listdir('.')}")
             return False
         
         # Get all Excel files
@@ -43,6 +43,7 @@ class DLDFAQProcessor:
         
         if not excel_files:
             logging.error(f"No Excel files found in {self.data_dir}")
+            logging.info(f"Files in {self.data_dir}: {os.listdir(self.data_dir)}")
             return False
             
         logging.info(f"Found {len(excel_files)} Excel files to process")
