@@ -36,5 +36,5 @@ def process_data():
         logging.error(f"Error processing data: {str(e)}")
         return False
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # Fixed: changed **name** to __name__
     process_data()
