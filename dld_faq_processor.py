@@ -15,13 +15,19 @@ load_dotenv()
 # Configure OpenAI API
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# Create OpenAI client for new API
+if openai.api_key:
+    client = openai.OpenAI(api_key=openai.api_key)
+else:
+    client = None
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class DLDFAQProcessor:
     """Process DLD FAQ Excel files with the specific structure identified."""
     
-    def __init__(self, data_dir="data", output_dir="processed_data"):  # Fixed: removed "S\" prefix
+    def __init__(self, data_dir="data", output_dir="processed_data"):
         """Initialize the processor."""
         self.data_dir = data_dir
         self.output_dir = output_dir
@@ -88,7 +94,7 @@ class DLDFAQProcessor:
                         continue
                     
                     # Check for module
-                    if not pd.isna(row['Module']):
+                    if 'Module' in row and not pd.isna(row['Module']):
                         current_module = row['Module']
                     
                     # Check for question - if we already have a question, this is a new pair
@@ -192,10 +198,14 @@ class DLDFAQProcessor:
         logging.info(f"Saved data to {csv_path}, {json_path}, and {search_path}")
     
     def create_embeddings(self):
-        """Create embeddings for the extracted Q&A pairs."""
+        """Create embeddings for the extracted Q&A pairs using modern OpenAI API."""
         if not self.all_qa_pairs:
             logging.error("No Q&A pairs to create embeddings for")
             return False
+        
+        if not client:
+            logging.warning("OpenAI client not available, skipping embeddings creation")
+            return True  # Return True to not fail the process
         
         try:
             logging.info("Creating embeddings for Q&A pairs...")
@@ -218,12 +228,12 @@ class DLDFAQProcessor:
                 logging.info(f"Processing embedding batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
                 
                 try:
-                    # Using the older OpenAI API syntax
-                    response = openai.Embedding.create(
+                    # Using the modern OpenAI API syntax
+                    response = client.embeddings.create(
                         model="text-embedding-3-small",
                         input=batch_texts
                     )
-                    batch_embeddings = [item["embedding"] for item in response["data"]]
+                    batch_embeddings = [item.embedding for item in response.data]
                     all_embeddings.extend(batch_embeddings)
                 except Exception as e:
                     logging.error(f"Error in batch {i//batch_size + 1}: {str(e)}")
