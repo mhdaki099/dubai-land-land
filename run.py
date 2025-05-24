@@ -58,7 +58,7 @@ def run_app():
         return False
     
     logging.info("Starting Streamlit application...")
-    os.system("streamlit run S/dld_chatbot_app.py")
+    os.system("streamlit run app.py")  # Fixed: changed from S/dld_chatbot_app.py to app.py
     return True
 
 def print_usage():
@@ -73,16 +73,11 @@ def print_usage():
     print("  --all         Process files and run the chatbot")
     print("  --help        Show this help message and exit")
 
-if __name__ == "__main__":
-
-    process_data()
-    run_app()
+if __name__ == "__main__":  # Fixed: changed **name** to __name__
     # Parse command line arguments
     if len(sys.argv) < 2 or "--help" in sys.argv:
         print_usage()
         sys.exit(0)
-
-
     
     # Check environment
     if not check_environment():
