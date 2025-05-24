@@ -46,9 +46,9 @@ def process_data(num_clusters=12):
 def start_app():
     """Start the Streamlit application."""
     logging.info("Starting Streamlit application...")
-    os.system("streamlit run app.py")
+    os.system("streamlit run app.py")  # Fixed: removed S/ prefix
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # Fixed: changed **name** to __name__
     parser = argparse.ArgumentParser(description="DLD FAQ Chatbot")
     parser.add_argument('--process', action='store_true', help='Process data files')
     parser.add_argument('--run', action='store_true', help='Run the Streamlit app')
