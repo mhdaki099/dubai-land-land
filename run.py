@@ -6,22 +6,75 @@ import openai
 import time
 import numpy as np
 import json
-import pickle
 
 # =============================================================================
-# STREAMLIT CLOUD CONFIGURATION
+# OPENAI API TESTING AND SETUP
 # =============================================================================
+
+def test_openai_api():
+    """Test OpenAI API with both ChatCompletion and Embedding."""
+    print("[DEBUG] Testing OpenAI API...")
+    
+    test_results = {
+        'api_key_configured': False,
+        'chat_completion_works': False,
+        'embedding_works': False,
+        'errors': []
+    }
+    
+    try:
+        # Check if API key is configured
+        if not openai.api_key:
+            test_results['errors'].append("No API key configured")
+            return test_results
+        
+        test_results['api_key_configured'] = True
+        print(f"[DEBUG] API key configured: {openai.api_key[:10]}...")
+        
+        # Test ChatCompletion
+        try:
+            print("[DEBUG] Testing ChatCompletion...")
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Say 'API test successful'"}],
+                max_tokens=10
+            )
+            test_results['chat_completion_works'] = True
+            print("[DEBUG] ChatCompletion test successful")
+        except Exception as e:
+            error_msg = f"ChatCompletion failed: {str(e)}"
+            test_results['errors'].append(error_msg)
+            print(f"[DEBUG] {error_msg}")
+        
+        # Test Embedding
+        try:
+            print("[DEBUG] Testing Embedding...")
+            response = openai.Embedding.create(
+                model="text-embedding-3-small",
+                input="test embedding"
+            )
+            test_results['embedding_works'] = True
+            print("[DEBUG] Embedding test successful")
+        except Exception as e:
+            error_msg = f"Embedding failed: {str(e)}"
+            test_results['errors'].append(error_msg)
+            print(f"[DEBUG] {error_msg}")
+            
+    except Exception as e:
+        error_msg = f"General API error: {str(e)}"
+        test_results['errors'].append(error_msg)
+        print(f"[DEBUG] {error_msg}")
+    
+    return test_results
 
 def setup_openai():
-    """Setup OpenAI API."""
+    """Setup OpenAI API with testing."""
     try:
         if hasattr(st, 'secrets'):
             if 'openai' in st.secrets and 'OPENAI_API_KEY' in st.secrets['openai']:
                 api_key = st.secrets['openai']['OPENAI_API_KEY']
-                st.sidebar.success("✅ Using Streamlit secrets")
             elif 'OPENAI_API_KEY' in st.secrets:
                 api_key = st.secrets['OPENAI_API_KEY']
-                st.sidebar.success("✅ Using Streamlit secrets")
             else:
                 st.sidebar.error("❌ No OpenAI API key found in secrets!")
                 return None
@@ -31,7 +84,18 @@ def setup_openai():
         
         openai.api_key = api_key
         print(f"[DEBUG] OpenAI API key configured: {api_key[:10]}...")
-        return api_key
+        
+        # Test the API
+        test_results = test_openai_api()
+        
+        if test_results['chat_completion_works'] and test_results['embedding_works']:
+            st.sidebar.success("✅ OpenAI API working properly")
+            return api_key
+        else:
+            st.sidebar.error("❌ OpenAI API issues detected")
+            for error in test_results['errors']:
+                st.sidebar.error(f"• {error}")
+            return None
         
     except Exception as e:
         st.sidebar.error(f"❌ Error setting up OpenAI: {str(e)}")
@@ -39,7 +103,7 @@ def setup_openai():
         return None
 
 # =============================================================================
-# DATA LOADER WITH DETAILED TRACKING
+# DATA LOADER
 # =============================================================================
 
 @st.cache_data
@@ -76,7 +140,6 @@ def load_excel_data():
             
             file_path = os.path.join(data_dir, filename)
             service_name = filename.replace('FAQs.xlsx', '').replace('.xlsx', '').strip()
-            print(f"[DEBUG] Service name extracted: {service_name}")
             
             # Try different header positions
             df = None
@@ -84,10 +147,8 @@ def load_excel_data():
             
             for header_row in [1, 2, 0]:
                 try:
-                    print(f"[DEBUG] Trying header row {header_row} for {filename}")
                     temp_df = pd.read_excel(file_path, header=header_row)
                     temp_df = temp_df.dropna(how='all')
-                    print(f"[DEBUG] Loaded {len(temp_df)} rows with columns: {list(temp_df.columns)}")
                     
                     # Look for question and answer columns
                     question_col = None
@@ -97,23 +158,18 @@ def load_excel_data():
                         col_str = str(col).lower()
                         if 'question' in col_str and 'eng' in col_str:
                             question_col = col
-                            print(f"[DEBUG] Found question column: {col}")
                         elif 'answer' in col_str and 'eng' in col_str:
                             answer_col = col
-                            print(f"[DEBUG] Found answer column: {col}")
                     
                     if question_col and answer_col:
                         df = temp_df
                         header_used = header_row
-                        print(f"[DEBUG] Successfully identified Q&A columns for {filename}")
                         break
                         
-                except Exception as e:
-                    print(f"[DEBUG] Header row {header_row} failed for {filename}: {str(e)}")
+                except Exception:
                     continue
             
             if df is not None and question_col and answer_col:
-                print(f"[DEBUG] Processing Q&A data for {filename}")
                 # Clean and prepare data
                 clean_df = df[[question_col, answer_col]].copy()
                 clean_df.columns = ['Question', 'Answer']
@@ -127,8 +183,6 @@ def load_excel_data():
                 clean_df = clean_df[clean_df['Answer'].str.len() > 10]
                 final_count = len(clean_df)
                 
-                print(f"[DEBUG] {filename}: {original_count} → {final_count} rows after cleaning")
-                
                 # Track statistics
                 file_stats[filename] = {
                     'service': service_name,
@@ -141,17 +195,14 @@ def load_excel_data():
                 
                 if final_count > 0:
                     all_data.append(clean_df)
-                    print(f"[DEBUG] Added {final_count} rows from {filename}")
                     
             else:
-                print(f"[DEBUG] Failed to process {filename} - no Q&A columns found")
                 file_stats[filename] = {
                     'service': service_name,
                     'error': 'Could not find question/answer columns'
                 }
                 
         except Exception as e:
-            print(f"[DEBUG] Exception processing {filename}: {str(e)}")
             file_stats[filename] = {
                 'service': service_name,
                 'error': str(e)
@@ -163,7 +214,6 @@ def load_excel_data():
     status_text.empty()
     
     if all_data:
-        print(f"[DEBUG] Combining data from {len(all_data)} files")
         combined_df = pd.concat(all_data, ignore_index=True)
         
         # Remove duplicates and track
@@ -171,12 +221,8 @@ def load_excel_data():
         combined_df = combined_df.drop_duplicates(subset=['Question'], keep='first')
         final_total = len(combined_df)
         
-        print(f"[DEBUG] Combined data: {original_total} → {final_total} rows (removed {original_total - final_total} duplicates)")
-        
         services = sorted(combined_df['Service'].unique().tolist())
         topics = ["All Topics"] + services
-        
-        print(f"[DEBUG] Services found: {services}")
         
         # Add processing stats
         file_stats['_summary'] = {
@@ -196,14 +242,16 @@ def load_excel_data():
         return pd.DataFrame(), [], file_stats
 
 # =============================================================================
-# EMBEDDING SYSTEM
+# EMBEDDING SYSTEM (FIXED)
 # =============================================================================
 
 def check_embeddings_exist():
     """Check if embeddings are already cached."""
     embeddings_file = "embeddings_cache.npy"
     metadata_file = "embeddings_metadata.json"
-    return os.path.exists(embeddings_file) and os.path.exists(metadata_file)
+    exists = os.path.exists(embeddings_file) and os.path.exists(metadata_file)
+    print(f"[DEBUG] Embeddings exist: {exists}")
+    return exists
 
 def load_cached_embeddings():
     """Load cached embeddings if they exist."""
@@ -214,7 +262,7 @@ def load_cached_embeddings():
         with open("embeddings_metadata.json", 'r') as f:
             metadata = json.load(f)
         
-        print(f"[DEBUG] Loaded {len(embeddings)} cached embeddings")
+        print(f"[DEBUG] Loaded {len(embeddings)} cached embeddings with shape {embeddings.shape}")
         return embeddings, metadata
     except Exception as e:
         print(f"[DEBUG] Error loading cached embeddings: {str(e)}")
@@ -245,7 +293,7 @@ def create_embeddings_for_df(df):
     # Create progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
-    batch_size = 10  # Small batches to avoid rate limits
+    batch_size = 5  # Very small batches to avoid rate limits
     
     total_batches = (len(questions) + batch_size - 1) // batch_size
     print(f"[DEBUG] Processing {total_batches} batches of {batch_size} questions each")
@@ -259,7 +307,7 @@ def create_embeddings_for_df(df):
         progress_bar.progress(batch_num / total_batches)
         
         try:
-            print(f"[DEBUG] Calling OpenAI for batch {batch_num} with {len(batch_questions)} questions")
+            print(f"[DEBUG] Calling OpenAI Embedding.create for batch {batch_num}")
             response = openai.Embedding.create(
                 model="text-embedding-3-small",
                 input=batch_questions
@@ -268,10 +316,10 @@ def create_embeddings_for_df(df):
             batch_embeddings = [item["embedding"] for item in response["data"]]
             embeddings.extend(batch_embeddings)
             
-            print(f"[DEBUG] Batch {batch_num} completed successfully")
+            print(f"[DEBUG] Batch {batch_num} completed successfully - got {len(batch_embeddings)} embeddings")
             
             # Small delay to respect rate limits
-            time.sleep(0.1)
+            time.sleep(0.2)
             
         except Exception as e:
             print(f"[DEBUG] Error in batch {batch_num}: {str(e)}")
@@ -305,33 +353,42 @@ def create_embeddings_for_df(df):
     return embeddings_array, metadata
 
 def semantic_search_with_embeddings(query, df, embeddings, top_k=3):
-    """Perform semantic search using embeddings."""
-    print(f"[DEBUG] Performing semantic search for: '{query}'")
+    """Perform semantic search using embeddings - FIXED VERSION."""
+    print(f"[DEBUG] Starting semantic search for: '{query}'")
+    print(f"[DEBUG] DataFrame shape: {df.shape}")
+    print(f"[DEBUG] Embeddings shape: {embeddings.shape}")
     
     try:
-        # Get query embedding
-        print("[DEBUG] Getting query embedding...")
+        # Get query embedding using the correct API
+        print("[DEBUG] Getting query embedding with openai.Embedding.create...")
         response = openai.Embedding.create(
             model="text-embedding-3-small",
             input=query
         )
         query_embedding = np.array(response["data"][0]["embedding"]).astype('float32')
+        print(f"[DEBUG] Query embedding shape: {query_embedding.shape}")
         
-        # Calculate similarities
-        print("[DEBUG] Calculating similarities...")
-        similarities = np.dot(embeddings, query_embedding)
+        # Calculate similarities (cosine similarity)
+        print("[DEBUG] Calculating cosine similarities...")
+        # Normalize embeddings for cosine similarity
+        embeddings_norm = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+        query_norm = query_embedding / np.linalg.norm(query_embedding)
+        
+        similarities = np.dot(embeddings_norm, query_norm)
+        print(f"[DEBUG] Similarities calculated, shape: {similarities.shape}")
+        print(f"[DEBUG] Similarity range: {similarities.min():.3f} to {similarities.max():.3f}")
         
         # Get top results
         top_indices = np.argsort(similarities)[::-1][:top_k]
-        
-        print(f"[DEBUG] Top {top_k} results found with similarities: {similarities[top_indices]}")
+        print(f"[DEBUG] Top {top_k} indices: {top_indices}")
+        print(f"[DEBUG] Top {top_k} similarities: {similarities[top_indices]}")
         
         results = []
         for i, idx in enumerate(top_indices):
             similarity_score = similarities[idx]
             row = df.iloc[idx]
             
-            results.append({
+            result = {
                 'question': row['Question'],
                 'answer': row['Answer'],
                 'service': row['Service'],
@@ -339,10 +396,12 @@ def semantic_search_with_embeddings(query, df, embeddings, top_k=3):
                 'similarity_score': float(similarity_score),
                 'rank': i + 1,
                 'method': 'semantic_embedding'
-            })
+            }
+            results.append(result)
             
             print(f"[DEBUG] Result {i+1}: {similarity_score:.3f} - {row['Question'][:50]}...")
         
+        print(f"[DEBUG] Semantic search completed successfully with {len(results)} results")
         return results
         
     except Exception as e:
@@ -438,6 +497,7 @@ def generate_response(query, search_results, search_method):
     print(f"[DEBUG] Generating response using {search_method} with {len(search_results)} results")
     
     if not search_results:
+        print("[DEBUG] No search results, returning default message")
         return "I'm sorry, I couldn't find an answer to your question. Could you please rephrase it or ask about Dubai Land Department services?"
     
     # If single high-confidence result, return directly
@@ -455,7 +515,7 @@ def generate_response(query, search_results, search_method):
         context += f"Confidence: {result['similarity_score']:.3f}\n"
     
     try:
-        print("[DEBUG] Calling OpenAI for response generation")
+        print("[DEBUG] Calling openai.ChatCompletion.create for response generation")
         system_prompt = """You are a helpful assistant for the Dubai Land Department. 
         Based on the provided FAQ information, give a clear and helpful answer to the user's question.
         Use a professional but friendly tone. Only use information from the provided FAQs.
@@ -563,7 +623,7 @@ def main():
     st.markdown('<h1 class="main-title">🏢 DLD FAQ Assistant</h1>', unsafe_allow_html=True)
     st.markdown("### Ask me anything about Dubai Land Department services")
     
-    # Setup OpenAI
+    # Setup OpenAI with testing
     api_key = setup_openai()
     if not api_key:
         st.error("Please configure your OpenAI API key in Streamlit secrets.")
@@ -617,7 +677,7 @@ def main():
                 st.session_state.embeddings = embeddings
                 st.session_state.embeddings_metadata = metadata
                 st.session_state.use_embeddings = True
-                print("[DEBUG] Embeddings loaded from cache")
+                print("[DEBUG] Embeddings loaded from cache and set to session state")
     
     # Sidebar
     with st.sidebar:
@@ -631,8 +691,22 @@ def main():
         st.session_state.debug_mode = st.checkbox("🔍 Debug Mode", value=st.session_state.debug_mode)
         show_sources = st.checkbox("📚 Show Sources", value=True)
         
+        # API Test Button
+        if st.button("🧪 Test OpenAI API"):
+            with st.spinner("Testing API..."):
+                test_results = test_openai_api()
+                if test_results['chat_completion_works'] and test_results['embedding_works']:
+                    st.success("✅ All API functions working!")
+                else:
+                    st.error("❌ API issues detected:")
+                    for error in test_results['errors']:
+                        st.error(f"• {error}")
+        
         # Embedding controls
         st.markdown("### 🧠 AI Search Mode")
+        
+        print(f"[DEBUG] Current embeddings state: {st.session_state.embeddings is not None}")
+        print(f"[DEBUG] Use embeddings setting: {st.session_state.use_embeddings}")
         
         if st.session_state.embeddings is not None:
             st.markdown('<div class="embedding-status embedding-enabled">✅ Semantic Search Active</div>', unsafe_allow_html=True)
@@ -646,6 +720,8 @@ def main():
                 index=0 if st.session_state.use_embeddings else 1
             )
             st.session_state.use_embeddings = (use_semantic == "🧠 Semantic Search (AI)")
+            print(f"[DEBUG] Search method selected: {use_semantic}")
+            print(f"[DEBUG] Use embeddings now set to: {st.session_state.use_embeddings}")
             
         else:
             st.markdown('<div class="embedding-status embedding-disabled">📝 Text Search Mode</div>', unsafe_allow_html=True)
@@ -722,12 +798,14 @@ def main():
     
     if user_input:
         print(f"[DEBUG] User input received: '{user_input}'")
+        print(f"[DEBUG] Current use_embeddings state: {st.session_state.use_embeddings}")
+        print(f"[DEBUG] Embeddings available: {st.session_state.embeddings is not None}")
         
         # Add user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         
         with st.spinner("Finding answer..."):
-            # Choose search method
+            # Choose search method based on current settings
             if st.session_state.use_embeddings and st.session_state.embeddings is not None:
                 print("[DEBUG] Using semantic search with embeddings")
                 search_results = semantic_search_with_embeddings(
@@ -744,6 +822,9 @@ def main():
                     selected_topic
                 )
                 search_method = "Text Search"
+            
+            print(f"[DEBUG] Search completed with method: {search_method}")
+            print(f"[DEBUG] Number of results: {len(search_results)}")
             
             # Generate response
             response = generate_response(user_input, search_results, search_method)
@@ -771,7 +852,8 @@ def main():
                     debug_info += f"• Query: '{user_input}'\n"
                     debug_info += f"• Results found: {len(search_results)}\n"
                     debug_info += f"• Topic filter: {selected_topic}\n"
-                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n\n"
+                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n"
+                    debug_info += f"• Use embeddings setting: {st.session_state.use_embeddings}\n\n"
                     
                     if search_results:
                         debug_info += f"📊 **Top Result Details**:\n"
@@ -782,6 +864,15 @@ def main():
                         debug_info += f"• Confidence score: {top_result['similarity_score']:.3f}\n"
                         debug_info += f"• Rank: {top_result['rank']}\n"
                         debug_info += f"• Question: {top_result['question'][:100]}...\n"
+            else:
+                # Debug info for no results
+                if st.session_state.debug_mode:
+                    debug_info = f"🔍 **Search Details**:\n"
+                    debug_info += f"• Method: {search_method}\n"
+                    debug_info += f"• Query: '{user_input}'\n"
+                    debug_info += f"• Results found: 0\n"
+                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n"
+                    debug_info += f"• Use embeddings setting: {st.session_state.use_embeddings}\n"
             
             print(f"[DEBUG] Response generated, adding to chat history")
             
