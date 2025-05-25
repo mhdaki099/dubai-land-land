@@ -19,9 +19,9 @@ def setup_openai():
                 api_key = st.secrets['openai']['OPENAI_API_KEY']
             elif 'OPENAI_API_KEY' in st.secrets:
                 api_key = st.secrets['OPENAI_API_KEY']
-            else:
-            # st.error("❌ No FAQ data loaded")
-            st.info("Please add Excel files to the 'data' directory")
+            # else:
+            # # st.error("❌ No FAQ data loaded")
+            # st.info("Please add Excel files to the 'data' directory")
         
         if st.button("🔄 Reset Chat", use_container_width=True):
             st.session_state.messages = []
