@@ -6,6 +6,9 @@ import re
 import openai
 import numpy as np
 import logging
+import pickle
+import faiss
+from sklearn.cluster import KMeans
 
 # =============================================================================
 # STREAMLIT CLOUD CONFIGURATION
@@ -55,71 +58,279 @@ def setup_openai_for_cloud():
         return None
 
 # =============================================================================
-# TRY TO IMPORT PROCESSORS (OPTIONAL FOR CLOUD)
+# CLOUD-COMPATIBLE DATA PROCESSOR
 # =============================================================================
 
-try:
-    from dld_faq_processor import DLDFAQProcessor
-    PROCESSOR_AVAILABLE = True
-except ImportError:
-    PROCESSOR_AVAILABLE = False
-    st.sidebar.warning("⚠️ Data processor not available in cloud environment")
-
-# =============================================================================
-# EMBEDDED FAQ DATA FOR CLOUD DEPLOYMENT
-# =============================================================================
-
-# Since processed data files might not exist in cloud, embed sample data
-SAMPLE_FAQ_DATA = [
-    {
-        "Question (English)": "How can I register a property sale with an initial mortgage?",
-        "Answer (English)": "To register a property sale with an initial mortgage, you need to apply via either the 'Registration Trustee' or 'Oqood' service depending on the details of your transaction. The documents you'll need to provide include a sale and purchase contract, a valid Emirates ID (or passport for non-residents), and a bank letter detailing the mortgage value, date, and three mortgage contracts. It's important that you ensure all these documents are presented in order to successfully register your property sale. Don't hesitate to reach out if you need further clarification or assistance.",
-        "Service": "Property Registration",
-        "Module": "Registration Trustee"
-    },
-    {
-        "Question (English)": "What documents do I need for property registration?",
-        "Answer (English)": "For property registration, you typically need: 1) Sale and purchase contract, 2) Valid Emirates ID or passport, 3) Bank letter for mortgage details (if applicable), 4) No Objection Certificate (NOC) from developer, 5) Property title deed, 6) Payment receipts for registration fees. Additional documents may be required depending on the specific type of transaction.",
-        "Service": "Property Registration", 
-        "Module": "Documentation"
-    },
-    {
-        "Question (English)": "How long does property registration take?",
-        "Answer (English)": "Property registration typically takes 1-3 business days for standard transactions. Complex cases involving mortgages or multiple parties may take 5-7 business days. You can track your application status through the DLD website or MyDLD app. Processing times may vary during peak periods or for special cases requiring additional verification.",
-        "Service": "Property Registration",
-        "Module": "Processing Times"
-    },
-    {
-        "Question (English)": "What are the fees for property registration?",
-        "Answer (English)": "Property registration fees are typically 4% of the property value, plus administrative fees. There may be additional charges for mortgage registration (approximately 0.25% of mortgage amount). Exact fees depend on property type and transaction details. You can get a fee estimate through the DLD website calculator.",
-        "Service": "Property Registration",
-        "Module": "Fees and Charges"
-    },
-    {
-        "Question (English)": "How can I check my property ownership status?",
-        "Answer (English)": "You can check your property ownership status through: 1) DLD website portal, 2) MyDLD mobile app, 3) Visit DLD customer service centers, 4) Call DLD customer service hotline. You'll need your Emirates ID and property details. The online services are available 24/7 for your convenience.",
-        "Service": "Property Inquiry",
-        "Module": "Ownership Verification"
-    },
-    {
-        "Question (English)": "What is Ejari and do I need it?",
-        "Answer (English)": "Ejari is the online rental registration system in Dubai. It's mandatory for all rental contracts and serves as proof of residence. You need Ejari for: opening bank accounts, getting utility connections, school admissions, and visa applications. You can register through the DLD website or authorized typing centers.",
-        "Service": "Ejari",
-        "Module": "Rental Registration"
-    },
-    {
-        "Question (English)": "How do I use the MyDLD app?",
-        "Answer (English)": "MyDLD is DLD's official mobile app available on iOS and Android. You can use it to: check property ownership, view transaction history, pay fees, track application status, and access various DLD services. Download from your app store and register with your Emirates ID.",
-        "Service": "MyDLD App",
-        "Module": "Mobile Services"
-    },
-    {
-        "Question (English)": "What services does a property trustee provide?",
-        "Answer (English)": "A Property Trustee facilitates property transactions by ensuring all legal requirements are met. Services include: document verification, escrow services, legal compliance checks, transaction coordination, and dispute resolution. Trustees are licensed professionals who protect both buyer and seller interests.",
-        "Service": "Property Trustee",
-        "Module": "Professional Services"
-    }
-]
+class CloudDataProcessor:
+    def __init__(self, data_dir: str = "data", num_clusters: int = 12):
+        """Initialize the cloud data processor."""
+        self.data_dir = data_dir
+        self.num_clusters = num_clusters
+        self.df_combined = None
+        self.cluster_names = {
+            0: "DLD Website",
+            1: "MyDLD App", 
+            2: "Dubai REST API",
+            3: "Ejari",
+            4: "Property Registration",
+            5: "Broker Services",
+            6: "Payments",
+            7: "Property Survey",
+            8: "Property Trustee",
+            9: "Rental Disputes",
+            10: "Inspection System",
+            11: "General Services"
+        }
+        
+    def get_embedding(self, text: str) -> list:
+        """Get embedding for text using OpenAI API."""
+        try:
+            response = openai.Embedding.create(
+                model="text-embedding-3-small",
+                input=text
+            )
+            return response["data"][0]["embedding"]
+        except Exception as e:
+            st.error(f"Error getting embedding: {str(e)}")
+            return [0.0] * 1536
+    
+    def get_embeddings_batch(self, texts: list, batch_size: int = 50) -> np.ndarray:
+        """Get embeddings for multiple texts in batches."""
+        all_embeddings = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i+batch_size]
+            batch_num = i//batch_size + 1
+            total_batches = (len(texts)-1)//batch_size + 1
+            
+            status_text.text(f"Processing embedding batch {batch_num}/{total_batches}")
+            progress_bar.progress(i / len(texts))
+            
+            try:
+                response = openai.Embedding.create(
+                    model="text-embedding-3-small",
+                    input=batch_texts
+                )
+                batch_embeddings = [item["embedding"] for item in response["data"]]
+                all_embeddings.extend(batch_embeddings)
+            except Exception as e:
+                st.error(f"Error in batch {batch_num}: {str(e)}")
+                # Add zero vectors as fallback
+                for _ in range(len(batch_texts)):
+                    all_embeddings.append([0.0] * 1536)
+        
+        progress_bar.progress(1.0)
+        status_text.text("✅ Embedding generation complete!")
+        
+        return np.array(all_embeddings).astype('float32')
+    
+    def load_excel_files(self) -> pd.DataFrame:
+        """Load and process all Excel files."""
+        all_dataframes = []
+        
+        if not os.path.exists(self.data_dir):
+            st.error(f"Data directory '{self.data_dir}' not found!")
+            return pd.DataFrame()
+        
+        excel_files = [f for f in os.listdir(self.data_dir) if f.endswith('.xlsx')]
+        
+        if not excel_files:
+            st.error(f"No Excel files found in '{self.data_dir}' directory!")
+            return pd.DataFrame()
+        
+        st.info(f"Found {len(excel_files)} Excel files to process")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for idx, filename in enumerate(excel_files):
+            status_text.text(f"Processing {filename} ({idx+1}/{len(excel_files)})")
+            progress_bar.progress(idx / len(excel_files))
+            
+            try:
+                file_path = os.path.join(self.data_dir, filename)
+                service_name = filename.replace('FAQs.xlsx', '').replace('.xlsx', '').strip()
+                
+                # Try different header rows
+                df = None
+                for header_row in [1, 2, 0]:
+                    try:
+                        df_temp = pd.read_excel(file_path, header=header_row)
+                        df_temp = df_temp.dropna(how='all')
+                        
+                        # Check if we have the expected columns
+                        has_question = any('question' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
+                        has_answer = any('answer' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
+                        
+                        if has_question and has_answer:
+                            df = df_temp
+                            break
+                    except:
+                        continue
+                
+                if df is None:
+                    st.warning(f"Could not process {filename} - skipping")
+                    continue
+                
+                # Map columns
+                col_mapping = {}
+                for col in df.columns:
+                    col_str = str(col).lower()
+                    if 'module' in col_str or 'section' in col_str:
+                        col_mapping[col] = 'Module'
+                    elif 'question' in col_str and ('eng' in col_str or 'en' in col_str):
+                        col_mapping[col] = 'Question (English)'
+                    elif 'answer' in col_str and ('eng' in col_str or 'en' in col_str):
+                        col_mapping[col] = 'Answer (English)'
+                    elif 'question' in col_str and ('ar' in col_str or 'arabic' in col_str):
+                        col_mapping[col] = 'Question (Arabic)'
+                    elif 'answer' in col_str and ('ar' in col_str or 'arabic' in col_str):
+                        col_mapping[col] = 'Answer (Arabic)'
+                    elif 'key' in col_str and 'word' in col_str:
+                        col_mapping[col] = 'Keywords'
+                
+                if col_mapping:
+                    df = df.rename(columns=col_mapping)
+                
+                # Ensure required columns exist
+                if 'Question (English)' in df.columns and 'Answer (English)' in df.columns:
+                    df['Service'] = service_name
+                    
+                    if 'Module' not in df.columns:
+                        df['Module'] = service_name
+                    
+                    # Clean data
+                    df = df[df['Question (English)'].notna() & df['Answer (English)'].notna()]
+                    
+                    # Add missing columns
+                    for col in ['Question (Arabic)', 'Answer (Arabic)', 'Keywords']:
+                        if col not in df.columns:
+                            df[col] = ''
+                    
+                    all_dataframes.append(df)
+                    st.success(f"✅ Processed {len(df)} FAQ items from {filename}")
+                else:
+                    st.warning(f"⚠️ Could not find required columns in {filename}")
+                    
+            except Exception as e:
+                st.error(f"❌ Error processing {filename}: {str(e)}")
+        
+        progress_bar.progress(1.0)
+        status_text.text("✅ File processing complete!")
+        
+        if all_dataframes:
+            self.df_combined = pd.concat(all_dataframes, ignore_index=True)
+            st.success(f"🎉 Successfully loaded {len(self.df_combined)} FAQ items from {len(all_dataframes)} files")
+            return self.df_combined
+        else:
+            st.error("❌ No valid data found in Excel files")
+            return pd.DataFrame()
+    
+    def clean_text(self, text: str) -> str:
+        """Clean and preprocess text data."""
+        if not isinstance(text, str):
+            return ""
+        text = re.sub(r'[^\w\s\.\?\!]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    
+    def preprocess_data(self) -> pd.DataFrame:
+        """Preprocess the combined dataframe."""
+        if self.df_combined is None or self.df_combined.empty:
+            return pd.DataFrame()
+        
+        st.info("🔄 Preprocessing data...")
+        
+        # Clean text
+        self.df_combined['Question_Clean'] = self.df_combined['Question (English)'].apply(self.clean_text)
+        self.df_combined['Answer_Clean'] = self.df_combined['Answer (English)'].apply(self.clean_text)
+        
+        # Fill missing values
+        self.df_combined['Question (Arabic)'].fillna('', inplace=True)
+        self.df_combined['Answer (Arabic)'].fillna('', inplace=True)
+        
+        # Remove duplicates
+        self.df_combined.drop_duplicates(subset=['Question_Clean'], keep='first', inplace=True)
+        
+        # Create embedding text
+        self.df_combined['Embed_Text'] = self.df_combined['Question_Clean']
+        if 'Keywords' in self.df_combined.columns:
+            self.df_combined['Embed_Text'] += ' ' + self.df_combined['Keywords'].fillna('')
+        
+        st.success(f"✅ Preprocessed {len(self.df_combined)} unique FAQ items")
+        return self.df_combined
+    
+    def create_clusters(self) -> pd.DataFrame:
+        """Create topic clusters from the questions."""
+        if self.df_combined is None or self.df_combined.empty:
+            return pd.DataFrame()
+        
+        st.info("🤖 Creating embeddings and clusters...")
+        
+        # Generate embeddings
+        embeddings = self.get_embeddings_batch(self.df_combined['Embed_Text'].tolist())
+        
+        # Perform clustering
+        n_clusters = min(self.num_clusters, len(self.df_combined))
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        self.df_combined['Cluster'] = kmeans.fit_predict(embeddings)
+        
+        # Map cluster IDs to names
+        available_names = list(self.cluster_names.values())[:n_clusters]
+        cluster_mapping = {i: available_names[i] if i < len(available_names) else f"Topic {i+1}" 
+                          for i in range(n_clusters)}
+        
+        self.df_combined['Cluster_Name'] = self.df_combined['Cluster'].map(cluster_mapping)
+        
+        # Show cluster distribution
+        cluster_counts = self.df_combined['Cluster_Name'].value_counts()
+        st.info("📊 Cluster distribution:")
+        for cluster, count in cluster_counts.items():
+            st.write(f"  • {cluster}: {count} questions")
+        
+        return self.df_combined
+    
+    def create_faiss_index(self) -> tuple:
+        """Create FAISS index for similarity search."""
+        if self.df_combined is None or self.df_combined.empty:
+            return None, None
+        
+        st.info("🔍 Creating search index...")
+        
+        # Generate embeddings for search
+        texts = self.df_combined['Embed_Text'].tolist()
+        embeddings = self.get_embeddings_batch(texts)
+        
+        # Create FAISS index
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings)
+        
+        st.success(f"✅ Created search index with {len(texts)} vectors")
+        return index, embeddings
+    
+    def process_all(self):
+        """Process all data and return results."""
+        # Load Excel files
+        df = self.load_excel_files()
+        if df.empty:
+            return None, None, None, None
+        
+        # Preprocess
+        df = self.preprocess_data()
+        if df.empty:
+            return None, None, None, None
+        
+        # Create clusters
+        df = self.create_clusters()
+        
+        # Create search index
+        index, embeddings = self.create_faiss_index()
+        
+        return df, index, embeddings, self.cluster_names
 
 # Page configuration
 st.set_page_config(
@@ -128,17 +339,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS
+# Custom CSS (same as before)
 st.markdown("""
 <style>
-    /* Main container styling */
-    .main {
-        padding: 2rem;
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-    
-    /* Title styling */
     .main-title {
         font-size: 2.8rem;
         color: #0f4c81;
@@ -156,7 +359,6 @@ st.markdown("""
         font-weight: 400;
     }
     
-    /* Chat message styling */
     .user-message {
         background-color: #e6f3ff;
         padding: 1.2rem;
@@ -178,7 +380,6 @@ st.markdown("""
         max-width: 85%;
     }
     
-    /* Sidebar styling */
     .sidebar-header {
         font-size: 1.3rem;
         font-weight: 600;
@@ -186,18 +387,6 @@ st.markdown("""
         margin: 1.5rem 0 0.8rem 0;
         padding-bottom: 0.5rem;
         border-bottom: 2px solid #e6f3ff;
-    }
-    
-    /* Info boxes styling */
-    .debug-info {
-        font-size: 0.85rem;
-        color: #666;
-        margin-top: 0.8rem;
-        border-top: 1px solid #eee;
-        padding-top: 0.8rem;
-        background-color: #fafafa;
-        padding: 0.8rem;
-        border-radius: 8px;
     }
     
     .source-info {
@@ -212,40 +401,40 @@ st.markdown("""
         border-radius: 8px;
     }
     
-    .enhanced-answer {
-        margin-top: 1.2rem;
-        background-color: #f8f9fa;
-        padding: 1.2rem;
-        border-radius: 10px;
-        border-left: 4px solid #0f4c81;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    .debug-info {
+        font-size: 0.85rem;
+        color: #666;
+        margin-top: 0.8rem;
+        border-top: 1px solid #eee;
+        padding-top: 0.8rem;
+        background-color: #fafafa;
+        padding: 0.8rem;
+        border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state variables
+# Initialize session state
 if 'messages' not in st.session_state:
     st.session_state.messages = []
-    
 if 'faq_data' not in st.session_state:
     st.session_state.faq_data = None
-    
+if 'search_index' not in st.session_state:
+    st.session_state.search_index = None
+if 'embeddings' not in st.session_state:
+    st.session_state.embeddings = None
 if 'topics' not in st.session_state:
     st.session_state.topics = ["All Topics"]
-    
 if 'selected_topic' not in st.session_state:
     st.session_state.selected_topic = "All Topics"
-    
 if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
-    
 if 'show_sources' not in st.session_state:
     st.session_state.show_sources = True
-    
-if 'enhanced_answers' not in st.session_state:
-    st.session_state.enhanced_answers = True
+if 'data_processed' not in st.session_state:
+    st.session_state.data_processed = False
 
-# Function to detect language
+# Functions for chat functionality
 def detect_language(text):
     """Detect if text is in Arabic or English."""
     arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
@@ -253,16 +442,13 @@ def detect_language(text):
         return "arabic"
     return "english"
 
-# Function to translate text
 def translate_text(text, target_language):
     """Translate text between English and Arabic."""
     if not text:
         return ""
-        
     try:
         system_prompt = f"Translate the following text to {target_language}. Keep the translation natural and accurate."
         
-        # Using CONSISTENT older OpenAI API syntax for cloud compatibility
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
@@ -277,188 +463,68 @@ def translate_text(text, target_language):
         st.error(f"Translation error: {str(e)}")
         return text
 
-# Function to load FAQ data (cloud-compatible)
-def load_faq_data():
-    """Load FAQ data from files or use embedded data."""
-    # Try to load from processed files first
-    csv_path = os.path.join("processed_data", "dld_faq_data.csv")
-    json_path = os.path.join("processed_data", "dld_faq_data.json")
-    
-    if os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path)
-            st.sidebar.success(f"✅ Loaded {len(df)} FAQ items from CSV")
-            
-            # Get unique services as topics
-            if 'Service' in df.columns:
-                services = sorted(df["Service"].unique().tolist())
-                topics = ["All Topics"] + services
-            else:
-                topics = ["All Topics"]
-            
-            return df, topics
-            
-        except Exception as e:
-            st.sidebar.error(f"Error loading CSV: {str(e)}")
-    
-    elif os.path.exists(json_path):
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                faq_data = json.load(f)
-                
-            df = pd.DataFrame(faq_data)
-            st.sidebar.success(f"✅ Loaded {len(df)} FAQ items from JSON")
-            
-            # Get unique services as topics
-            if 'Service' in df.columns:
-                services = sorted(df["Service"].unique().tolist())
-                topics = ["All Topics"] + services
-            else:
-                topics = ["All Topics"]
-            
-            return df, topics
-            
-        except Exception as e:
-            st.sidebar.error(f"Error loading JSON: {str(e)}")
-    
-    # Fall back to embedded sample data
-    st.sidebar.warning("⚠️ Using embedded sample data (processed files not found)")
-    df = pd.DataFrame(SAMPLE_FAQ_DATA)
-    services = sorted(df["Service"].unique().tolist())
-    topics = ["All Topics"] + services
-    
-    return df, topics
-
-# Improved search function
-def search_faqs_improved(query, df, topic=None, top_k=5):
-    """Enhanced search function that combines text matching with OpenAI semantic search."""
-    if df.empty or not query:
+def search_faqs_with_faiss(query, df, index, embeddings, topic=None, top_k=5):
+    """Search FAQs using FAISS index."""
+    if df.empty or not query or index is None:
         return []
     
     # Filter by topic if specified
     if topic and topic != "All Topics":
-        if 'Service' in df.columns:
-            filtered_df = df[df['Service'] == topic]
-            if len(filtered_df) == 0:
-                filtered_df = df
-        else:
+        filtered_df = df[df['Service'] == topic]
+        if len(filtered_df) == 0:
             filtered_df = df
     else:
         filtered_df = df
     
-    # Try OpenAI semantic search first
     try:
-        # Create a list of questions for OpenAI to compare against
-        max_questions = min(50, len(filtered_df))  # Reduced for cloud efficiency
-        questions_with_indices = [(i, q) for i, q in enumerate(filtered_df['Question (English)'].head(max_questions))]
+        # Get query embedding
+        processor = CloudDataProcessor()
+        query_embedding = np.array(processor.get_embedding(query)).reshape(1, -1).astype('float32')
         
-        # Format the questions for OpenAI
-        questions_text = "\n".join([f"{i+1}. {q}" for i, (_, q) in enumerate(questions_with_indices)])
+        # Search FAISS index
+        distances, indices = index.search(query_embedding, min(top_k * 2, len(df)))
         
-        system_prompt = """
-        You are a search engine that finds questions in a FAQ database that are semantically similar 
-        to a user's query, even if they use different wording.
-        
-        Given a user query and a list of FAQ questions, identify the top 3 questions that are most similar 
-        in meaning to the user query. Look for questions that are asking for the same information, 
-        even if they use different words or phrasing.
-        
-        Return ONLY the numbers of the 3 most semantically similar questions, separated by commas.
-        Example output: 5, 12, 8
-        
-        If none of the questions are semantically similar, return "NONE".
-        """
-        
-        # Using CONSISTENT older OpenAI API syntax
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"User query: {query}\n\nFAQ Questions:\n{questions_text}"}
-            ],
-            temperature=0.2
-        )
-        
-        result = response.choices[0].message.content.strip()
-        
-        # Get semantic matches
-        semantic_indices = []
-        if result != "NONE":
-            question_numbers = [int(num.strip()) for num in re.findall(r'\d+', result)]
-            for num in question_numbers:
-                if 1 <= num <= len(questions_with_indices):
-                    semantic_indices.append(questions_with_indices[num-1][0])
-        
-        # Also do text-based search as backup
-        query_lower = query.lower().strip()
-        query_words = set(query_lower.split())
-        
-        scores = []
-        for idx, row in filtered_df.iterrows():
-            question = row['Question (English)'].lower()
-            question_words = set(question.split())
-            
-            score = 0
-            if query_lower in question:
-                score += 20
-            
-            common_words = query_words.intersection(question_words)
-            score += len(common_words) * 8
-            
-            # Boost for registration-related terms
-            if any(word in ['register', 'registration'] for word in query_words) and any(word in ['register', 'registration'] for word in question_words):
-                score += 10
-            
-            scores.append((score, idx))
-        
-        scores.sort(reverse=True)
-        text_indices = [idx for score, idx in scores[:top_k] if score > 0]
-        
-        # Combine semantic and text results
-        combined_indices = []
-        for idx in semantic_indices:
-            if idx not in combined_indices:
-                combined_indices.append(idx)
-                
-        for idx in text_indices:
-            if idx not in combined_indices and len(combined_indices) < top_k:
-                combined_indices.append(idx)
-        
-        # Prepare results
         results = []
-        for i, idx in enumerate(combined_indices):
-            if 0 <= idx < len(filtered_df):
-                row = filtered_df.iloc[idx]
+        for i, idx in enumerate(indices[0]):
+            if idx < len(df):
+                row = df.iloc[idx]
+                
+                # Skip if topic filter doesn't match
+                if topic and topic != "All Topics" and row['Service'] != topic:
+                    continue
+                
                 results.append({
                     'question': row['Question (English)'],
                     'answer': row['Answer (English)'],
-                    'service': row['Service'] if 'Service' in row else 'Unknown',
+                    'service': row['Service'],
                     'module': row['Module'] if 'Module' in row and not pd.isna(row['Module']) else "",
-                    'relevance': 1.0 - (0.1 * i),
+                    'relevance': 1 - (distances[0][i] / 10),
                     'debug_info': {
-                        'match_type': "Semantic" if idx in semantic_indices else "Text",
                         'idx': idx,
-                        'rank': i+1
+                        'distance': distances[0][i],
+                        'rank': len(results) + 1
                     }
                 })
+                
+                if len(results) >= top_k:
+                    break
         
         return results
         
     except Exception as e:
-        st.error(f"Error in search: {str(e)}")
+        st.error(f"Search error: {str(e)}")
         return []
 
-# Function to generate response
 def generate_response(query, relevant_faqs, language):
-    """Generate a response based on the relevant FAQs."""
+    """Generate response based on relevant FAQs."""
     if not relevant_faqs:
         if language == "arabic":
             return "عذراً، لم أتمكن من العثور على إجابة لسؤالك. هل يمكنك إعادة صياغة السؤال أو طرح سؤال آخر؟"
         else:
             return "I'm sorry, I couldn't find an answer to your question. Could you rephrase your question or ask something else?"
     
-    # For a single, highly relevant FAQ, return directly
-    if len(relevant_faqs) == 1 and relevant_faqs[0]['relevance'] > 0.9:
+    # For single highly relevant FAQ, return directly
+    if len(relevant_faqs) == 1 and relevant_faqs[0]['relevance'] > 0.8:
         answer = relevant_faqs[0]['answer']
         if language == "arabic":
             try:
@@ -467,14 +533,14 @@ def generate_response(query, relevant_faqs, language):
                 pass
         return answer
     
-    # Prepare context from multiple FAQs
+    # Prepare context for multiple FAQs
     faq_context = ""
     for i, faq in enumerate(relevant_faqs):
         faq_context += f"\nItem {i+1}:\n"
         faq_context += f"Question: {faq['question']}\n"
         faq_context += f"Answer: {faq['answer']}\n"
         faq_context += f"Service: {faq['service']}\n"
-        
+    
     try:
         system_prompt = """
         You are a helpful assistant for the Dubai Land Department. Your task is to provide accurate and helpful responses to user queries about DLD services.
@@ -490,7 +556,6 @@ def generate_response(query, relevant_faqs, language):
         Format your response as a complete answer without mentioning that it came from FAQs or referring to "FAQ items" in your response.
         """
         
-        # Using CONSISTENT older OpenAI API syntax
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
@@ -503,7 +568,7 @@ def generate_response(query, relevant_faqs, language):
         
         if language == "arabic":
             answer = translate_text(answer, "arabic")
-            
+        
         return answer
     
     except Exception as e:
@@ -514,9 +579,8 @@ def generate_response(query, relevant_faqs, language):
         else:
             return "Sorry, there was an error processing your request. Please try again."
 
-# Function to create source explanation
 def create_source_explanation(query, relevant_faqs, language="english"):
-    """Create an explanation of the sources used to answer the query."""
+    """Create explanation of sources used."""
     if not relevant_faqs:
         return ""
     
@@ -561,12 +625,33 @@ def main():
         """)
         st.stop()
     
-    # Load data
-    if st.session_state.faq_data is None:
-        with st.spinner("Loading FAQ data..."):
-            df, topics = load_faq_data()
-            st.session_state.faq_data = df
-            st.session_state.topics = topics
+    # Main title
+    st.markdown('<h1 class="main-title">DLD FAQ Assistant</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-title">Ask me anything about Dubai Land Department services</p>', unsafe_allow_html=True)
+    
+    # Check if data needs to be processed
+    if not st.session_state.data_processed:
+        st.info("🚀 **First-time setup**: Processing your Excel files to create embeddings and search index...")
+        
+        with st.spinner("Processing data... This may take a few minutes."):
+            processor = CloudDataProcessor()
+            df, index, embeddings, cluster_names = processor.process_all()
+            
+            if df is not None and not df.empty:
+                st.session_state.faq_data = df
+                st.session_state.search_index = index
+                st.session_state.embeddings = embeddings
+                
+                # Get topics from services
+                services = sorted(df["Service"].unique().tolist())
+                st.session_state.topics = ["All Topics"] + services
+                
+                st.session_state.data_processed = True
+                st.success("🎉 Data processing complete! You can now ask questions.")
+                st.rerun()
+            else:
+                st.error("❌ Failed to process data. Please check your Excel files.")
+                st.stop()
     
     # Sidebar
     with st.sidebar:
@@ -584,11 +669,12 @@ def main():
             st.session_state.debug_mode = st.checkbox("Debug Mode", value=st.session_state.debug_mode)
         with col2:
             st.session_state.show_sources = st.checkbox("Show Sources", value=st.session_state.show_sources)
-        st.session_state.enhanced_answers = st.checkbox("Enhanced Answers", value=st.session_state.enhanced_answers)
         
         st.markdown('<div class="sidebar-header">System Status</div>', unsafe_allow_html=True)
-        if not st.session_state.faq_data.empty:
-            st.info(f"📚 {len(st.session_state.faq_data)} FAQ items across {len(st.session_state.topics)-1} topics")
+        if st.session_state.faq_data is not None and not st.session_state.faq_data.empty:
+            num_topics = len(st.session_state.topics) - 1  # Exclude "All Topics"
+            st.info(f"📚 {len(st.session_state.faq_data)} FAQ items across {num_topics} topics")
+            st.success("✅ Real FAQ data with embeddings loaded")
         else:
             st.error("❌ No FAQ data loaded")
         
@@ -596,19 +682,13 @@ def main():
         if st.button("🔄 Reset Conversation", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
-    
-    # Main content
-    st.markdown('<h1 class="main-title">DLD FAQ Assistant</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-title">Ask me anything about Dubai Land Department services</p>', unsafe_allow_html=True)
-    
-    # Quick tips
-    with st.expander("💡 Quick Tips", expanded=False):
-        st.markdown("""
-        - Type your question in English or Arabic
-        - Select a specific topic for more accurate answers
-        - Use clear and specific language for best results
-        - The system uses advanced AI to understand your questions
-        """)
+        
+        if st.button("🔄 Reprocess Data", use_container_width=True):
+            st.session_state.data_processed = False
+            st.session_state.faq_data = None
+            st.session_state.search_index = None
+            st.session_state.embeddings = None
+            st.rerun()
     
     # Display chat messages
     chat_container = st.container()
@@ -633,8 +713,8 @@ def main():
                     st.markdown(f'<div class="debug-info">{debug_info}</div>', unsafe_allow_html=True)
     
     # No FAQ data warning
-    if st.session_state.faq_data.empty:
-        st.warning("No FAQ data available.")
+    if st.session_state.faq_data is None or st.session_state.faq_data.empty:
+        st.warning("Please wait for data processing to complete.")
         return
     
     # User input
@@ -660,10 +740,12 @@ def main():
             else:
                 english_query = user_query
             
-            # Search for relevant FAQs
-            relevant_faqs = search_faqs_improved(
-                english_query, 
-                st.session_state.faq_data, 
+            # Search for relevant FAQs using FAISS
+            relevant_faqs = search_faqs_with_faiss(
+                english_query,
+                st.session_state.faq_data,
+                st.session_state.search_index,
+                st.session_state.embeddings,
                 st.session_state.selected_topic
             )
             
@@ -679,6 +761,9 @@ def main():
             debug_info = ""
             if st.session_state.debug_mode:
                 debug_info = f"Language: {language}\nRelevant FAQs found: {len(relevant_faqs)}"
+                if relevant_faqs:
+                    debug_info += f"\nTop match: {relevant_faqs[0]['service']}"
+                    debug_info += f"\nRelevance score: {relevant_faqs[0]['relevance']:.3f}"
             
             # Add bot response to chat history
             st.session_state.messages.append({
