@@ -9,6 +9,7 @@ import logging
 import pickle
 import faiss
 from sklearn.cluster import KMeans
+import hashlib
 
 # =============================================================================
 # STREAMLIT CLOUD CONFIGURATION
@@ -21,10 +22,10 @@ def setup_openai_for_cloud():
         if hasattr(st, 'secrets'):
             if 'openai' in st.secrets and 'OPENAI_API_KEY' in st.secrets['openai']:
                 api_key = st.secrets['openai']['OPENAI_API_KEY']
-                st.sidebar.success("✅ Using Streamlit secrets (openai.OPENAI_API_KEY)")
+                st.sidebar.success("✅ Using Streamlit secrets")
             elif 'OPENAI_API_KEY' in st.secrets:
                 api_key = st.secrets['OPENAI_API_KEY']
-                st.sidebar.success("✅ Using Streamlit secrets (OPENAI_API_KEY)")
+                st.sidebar.success("✅ Using Streamlit secrets")
             else:
                 # Fallback to environment variables (for local development)
                 from dotenv import load_dotenv
@@ -58,279 +59,246 @@ def setup_openai_for_cloud():
         return None
 
 # =============================================================================
-# CLOUD-COMPATIBLE DATA PROCESSOR
+# OPTIMIZED DATA PROCESSOR WITH CACHING
 # =============================================================================
 
-class CloudDataProcessor:
-    def __init__(self, data_dir: str = "data", num_clusters: int = 12):
-        """Initialize the cloud data processor."""
-        self.data_dir = data_dir
-        self.num_clusters = num_clusters
-        self.df_combined = None
-        self.cluster_names = {
-            0: "DLD Website",
-            1: "MyDLD App", 
-            2: "Dubai REST API",
-            3: "Ejari",
-            4: "Property Registration",
-            5: "Broker Services",
-            6: "Payments",
-            7: "Property Survey",
-            8: "Property Trustee",
-            9: "Rental Disputes",
-            10: "Inspection System",
-            11: "General Services"
-        }
+@st.cache_data(show_spinner=False)
+def get_data_hash(data_dir):
+    """Create hash of data directory to detect changes."""
+    if not os.path.exists(data_dir):
+        return None
+    
+    files = [f for f in os.listdir(data_dir) if f.endswith('.xlsx')]
+    if not files:
+        return None
+    
+    # Create hash based on file names and modification times
+    file_info = []
+    for f in sorted(files):
+        file_path = os.path.join(data_dir, f)
+        mtime = os.path.getmtime(file_path)
+        file_info.append(f"{f}:{mtime}")
+    
+    return hashlib.md5("".join(file_info).encode()).hexdigest()
+
+@st.cache_data(show_spinner=False)
+def load_cached_data():
+    """Load cached processed data if it exists."""
+    cache_dir = "processed_cache"
+    
+    if not os.path.exists(cache_dir):
+        return None, None, None, None, None
+    
+    try:
+        # Load cached DataFrame
+        df_path = os.path.join(cache_dir, "faq_data.csv")
+        if not os.path.exists(df_path):
+            return None, None, None, None, None
         
-    def get_embedding(self, text: str) -> list:
-        """Get embedding for text using OpenAI API."""
+        df = pd.read_csv(df_path)
+        
+        # Load embeddings
+        embeddings_path = os.path.join(cache_dir, "embeddings.npy")
+        if os.path.exists(embeddings_path):
+            embeddings = np.load(embeddings_path)
+        else:
+            return None, None, None, None, None
+        
+        # Load FAISS index
+        index_path = os.path.join(cache_dir, "faiss_index.bin")
+        if os.path.exists(index_path):
+            index = faiss.read_index(index_path)
+        else:
+            return None, None, None, None, None
+        
+        # Load metadata
+        meta_path = os.path.join(cache_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r') as f:
+                metadata = json.load(f)
+        else:
+            metadata = {}
+        
+        # Load topics
+        topics_path = os.path.join(cache_dir, "topics.json")
+        if os.path.exists(topics_path):
+            with open(topics_path, 'r') as f:
+                topics = json.load(f)
+        else:
+            topics = ["All Topics"]
+        
+        return df, index, embeddings, metadata, topics
+        
+    except Exception as e:
+        st.error(f"Error loading cached data: {str(e)}")
+        return None, None, None, None, None
+
+def save_processed_data(df, index, embeddings, metadata, topics):
+    """Save processed data to cache."""
+    cache_dir = "processed_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    try:
+        # Save DataFrame
+        df.to_csv(os.path.join(cache_dir, "faq_data.csv"), index=False)
+        
+        # Save embeddings
+        np.save(os.path.join(cache_dir, "embeddings.npy"), embeddings)
+        
+        # Save FAISS index
+        faiss.write_index(index, os.path.join(cache_dir, "faiss_index.bin"))
+        
+        # Save metadata
+        with open(os.path.join(cache_dir, "metadata.json"), 'w') as f:
+            json.dump(metadata, f)
+        
+        # Save topics
+        with open(os.path.join(cache_dir, "topics.json"), 'w') as f:
+            json.dump(topics, f)
+        
+        return True
+    except Exception as e:
+        st.error(f"Error saving data: {str(e)}")
+        return False
+
+def get_embedding_batch(texts, batch_size=20):
+    """Get embeddings in small batches to avoid rate limits."""
+    all_embeddings = []
+    
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i+batch_size]
+        
         try:
             response = openai.Embedding.create(
                 model="text-embedding-3-small",
-                input=text
+                input=batch_texts
             )
-            return response["data"][0]["embedding"]
+            batch_embeddings = [item["embedding"] for item in response["data"]]
+            all_embeddings.extend(batch_embeddings)
+            
+            # Show progress
+            progress = (i + batch_size) / len(texts)
+            st.session_state.progress_bar.progress(min(progress, 1.0))
+            st.session_state.status_text.text(f"Creating embeddings... {i + batch_size}/{len(texts)}")
+            
         except Exception as e:
-            st.error(f"Error getting embedding: {str(e)}")
-            return [0.0] * 1536
+            st.error(f"Error in embedding batch: {str(e)}")
+            # Add zero vectors as fallback
+            for _ in range(len(batch_texts)):
+                all_embeddings.append([0.0] * 1536)
     
-    def get_embeddings_batch(self, texts: list, batch_size: int = 50) -> np.ndarray:
-        """Get embeddings for multiple texts in batches."""
-        all_embeddings = []
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
-            batch_num = i//batch_size + 1
-            total_batches = (len(texts)-1)//batch_size + 1
-            
-            status_text.text(f"Processing embedding batch {batch_num}/{total_batches}")
-            progress_bar.progress(i / len(texts))
-            
-            try:
-                response = openai.Embedding.create(
-                    model="text-embedding-3-small",
-                    input=batch_texts
-                )
-                batch_embeddings = [item["embedding"] for item in response["data"]]
-                all_embeddings.extend(batch_embeddings)
-            except Exception as e:
-                st.error(f"Error in batch {batch_num}: {str(e)}")
-                # Add zero vectors as fallback
-                for _ in range(len(batch_texts)):
-                    all_embeddings.append([0.0] * 1536)
-        
-        progress_bar.progress(1.0)
-        status_text.text("✅ Embedding generation complete!")
-        
-        return np.array(all_embeddings).astype('float32')
+    return np.array(all_embeddings).astype('float32')
+
+def process_excel_files():
+    """Process Excel files quickly and efficiently."""
+    data_dir = "data"
     
-    def load_excel_files(self) -> pd.DataFrame:
-        """Load and process all Excel files."""
-        all_dataframes = []
+    if not os.path.exists(data_dir):
+        st.error(f"Data directory '{data_dir}' not found!")
+        return None, None, None, None, None
+    
+    excel_files = [f for f in os.listdir(data_dir) if f.endswith('.xlsx')]
+    
+    if not excel_files:
+        st.error(f"No Excel files found in '{data_dir}' directory!")
+        return None, None, None, None, None
+    
+    all_dataframes = []
+    
+    # Process files with progress
+    for idx, filename in enumerate(excel_files):
+        progress = idx / len(excel_files)
+        st.session_state.progress_bar.progress(progress)
+        st.session_state.status_text.text(f"Processing {filename} ({idx+1}/{len(excel_files)})")
         
-        if not os.path.exists(self.data_dir):
-            st.error(f"Data directory '{self.data_dir}' not found!")
-            return pd.DataFrame()
-        
-        excel_files = [f for f in os.listdir(self.data_dir) if f.endswith('.xlsx')]
-        
-        if not excel_files:
-            st.error(f"No Excel files found in '{self.data_dir}' directory!")
-            return pd.DataFrame()
-        
-        st.info(f"Found {len(excel_files)} Excel files to process")
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, filename in enumerate(excel_files):
-            status_text.text(f"Processing {filename} ({idx+1}/{len(excel_files)})")
-            progress_bar.progress(idx / len(excel_files))
+        try:
+            file_path = os.path.join(data_dir, filename)
+            service_name = filename.replace('FAQs.xlsx', '').replace('.xlsx', '').strip()
             
-            try:
-                file_path = os.path.join(self.data_dir, filename)
-                service_name = filename.replace('FAQs.xlsx', '').replace('.xlsx', '').strip()
-                
-                # Try different header rows
-                df = None
-                for header_row in [1, 2, 0]:
-                    try:
-                        df_temp = pd.read_excel(file_path, header=header_row)
-                        df_temp = df_temp.dropna(how='all')
-                        
-                        # Check if we have the expected columns
-                        has_question = any('question' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
-                        has_answer = any('answer' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
-                        
-                        if has_question and has_answer:
-                            df = df_temp
-                            break
-                    except:
-                        continue
-                
-                if df is None:
-                    st.warning(f"Could not process {filename} - skipping")
+            # Try different header configurations
+            df = None
+            for header_row in [1, 2, 0]:
+                try:
+                    df_temp = pd.read_excel(file_path, header=header_row)
+                    df_temp = df_temp.dropna(how='all')
+                    
+                    # Check for required columns
+                    has_question = any('question' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
+                    has_answer = any('answer' in str(col).lower() and 'eng' in str(col).lower() for col in df_temp.columns)
+                    
+                    if has_question and has_answer:
+                        df = df_temp
+                        break
+                except:
                     continue
+            
+            if df is None:
+                continue
+            
+            # Quick column mapping
+            col_mapping = {}
+            for col in df.columns:
+                col_str = str(col).lower()
+                if 'question' in col_str and ('eng' in col_str or 'en' in col_str):
+                    col_mapping[col] = 'Question (English)'
+                elif 'answer' in col_str and ('eng' in col_str or 'en' in col_str):
+                    col_mapping[col] = 'Answer (English)'
+                elif 'module' in col_str:
+                    col_mapping[col] = 'Module'
+            
+            if col_mapping:
+                df = df.rename(columns=col_mapping)
+            
+            # Basic data cleaning
+            if 'Question (English)' in df.columns and 'Answer (English)' in df.columns:
+                df['Service'] = service_name
+                if 'Module' not in df.columns:
+                    df['Module'] = service_name
                 
-                # Map columns
-                col_mapping = {}
-                for col in df.columns:
-                    col_str = str(col).lower()
-                    if 'module' in col_str or 'section' in col_str:
-                        col_mapping[col] = 'Module'
-                    elif 'question' in col_str and ('eng' in col_str or 'en' in col_str):
-                        col_mapping[col] = 'Question (English)'
-                    elif 'answer' in col_str and ('eng' in col_str or 'en' in col_str):
-                        col_mapping[col] = 'Answer (English)'
-                    elif 'question' in col_str and ('ar' in col_str or 'arabic' in col_str):
-                        col_mapping[col] = 'Question (Arabic)'
-                    elif 'answer' in col_str and ('ar' in col_str or 'arabic' in col_str):
-                        col_mapping[col] = 'Answer (Arabic)'
-                    elif 'key' in col_str and 'word' in col_str:
-                        col_mapping[col] = 'Keywords'
+                # Clean data
+                df = df[df['Question (English)'].notna() & df['Answer (English)'].notna()]
+                df = df[df['Question (English)'].str.len() > 10]  # Remove very short questions
                 
-                if col_mapping:
-                    df = df.rename(columns=col_mapping)
-                
-                # Ensure required columns exist
-                if 'Question (English)' in df.columns and 'Answer (English)' in df.columns:
-                    df['Service'] = service_name
+                if len(df) > 0:
+                    all_dataframes.append(df[['Question (English)', 'Answer (English)', 'Service', 'Module']])
                     
-                    if 'Module' not in df.columns:
-                        df['Module'] = service_name
-                    
-                    # Clean data
-                    df = df[df['Question (English)'].notna() & df['Answer (English)'].notna()]
-                    
-                    # Add missing columns
-                    for col in ['Question (Arabic)', 'Answer (Arabic)', 'Keywords']:
-                        if col not in df.columns:
-                            df[col] = ''
-                    
-                    all_dataframes.append(df)
-                    st.success(f"✅ Processed {len(df)} FAQ items from {filename}")
-                else:
-                    st.warning(f"⚠️ Could not find required columns in {filename}")
-                    
-            except Exception as e:
-                st.error(f"❌ Error processing {filename}: {str(e)}")
-        
-        progress_bar.progress(1.0)
-        status_text.text("✅ File processing complete!")
-        
-        if all_dataframes:
-            self.df_combined = pd.concat(all_dataframes, ignore_index=True)
-            st.success(f"🎉 Successfully loaded {len(self.df_combined)} FAQ items from {len(all_dataframes)} files")
-            return self.df_combined
-        else:
-            st.error("❌ No valid data found in Excel files")
-            return pd.DataFrame()
+        except Exception as e:
+            continue  # Skip problematic files
     
-    def clean_text(self, text: str) -> str:
-        """Clean and preprocess text data."""
-        if not isinstance(text, str):
-            return ""
-        text = re.sub(r'[^\w\s\.\?\!]', ' ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
+    if not all_dataframes:
+        st.error("No valid data found in Excel files")
+        return None, None, None, None, None
     
-    def preprocess_data(self) -> pd.DataFrame:
-        """Preprocess the combined dataframe."""
-        if self.df_combined is None or self.df_combined.empty:
-            return pd.DataFrame()
-        
-        st.info("🔄 Preprocessing data...")
-        
-        # Clean text
-        self.df_combined['Question_Clean'] = self.df_combined['Question (English)'].apply(self.clean_text)
-        self.df_combined['Answer_Clean'] = self.df_combined['Answer (English)'].apply(self.clean_text)
-        
-        # Fill missing values
-        self.df_combined['Question (Arabic)'].fillna('', inplace=True)
-        self.df_combined['Answer (Arabic)'].fillna('', inplace=True)
-        
-        # Remove duplicates
-        self.df_combined.drop_duplicates(subset=['Question_Clean'], keep='first', inplace=True)
-        
-        # Create embedding text
-        self.df_combined['Embed_Text'] = self.df_combined['Question_Clean']
-        if 'Keywords' in self.df_combined.columns:
-            self.df_combined['Embed_Text'] += ' ' + self.df_combined['Keywords'].fillna('')
-        
-        st.success(f"✅ Preprocessed {len(self.df_combined)} unique FAQ items")
-        return self.df_combined
+    # Combine all data
+    df_combined = pd.concat(all_dataframes, ignore_index=True)
     
-    def create_clusters(self) -> pd.DataFrame:
-        """Create topic clusters from the questions."""
-        if self.df_combined is None or self.df_combined.empty:
-            return pd.DataFrame()
-        
-        st.info("🤖 Creating embeddings and clusters...")
-        
-        # Generate embeddings
-        embeddings = self.get_embeddings_batch(self.df_combined['Embed_Text'].tolist())
-        
-        # Perform clustering
-        n_clusters = min(self.num_clusters, len(self.df_combined))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        self.df_combined['Cluster'] = kmeans.fit_predict(embeddings)
-        
-        # Map cluster IDs to names
-        available_names = list(self.cluster_names.values())[:n_clusters]
-        cluster_mapping = {i: available_names[i] if i < len(available_names) else f"Topic {i+1}" 
-                          for i in range(n_clusters)}
-        
-        self.df_combined['Cluster_Name'] = self.df_combined['Cluster'].map(cluster_mapping)
-        
-        # Show cluster distribution
-        cluster_counts = self.df_combined['Cluster_Name'].value_counts()
-        st.info("📊 Cluster distribution:")
-        for cluster, count in cluster_counts.items():
-            st.write(f"  • {cluster}: {count} questions")
-        
-        return self.df_combined
+    # Remove duplicates
+    df_combined.drop_duplicates(subset=['Question (English)'], keep='first', inplace=True)
     
-    def create_faiss_index(self) -> tuple:
-        """Create FAISS index for similarity search."""
-        if self.df_combined is None or self.df_combined.empty:
-            return None, None
-        
-        st.info("🔍 Creating search index...")
-        
-        # Generate embeddings for search
-        texts = self.df_combined['Embed_Text'].tolist()
-        embeddings = self.get_embeddings_batch(texts)
-        
-        # Create FAISS index
-        dimension = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(embeddings)
-        
-        st.success(f"✅ Created search index with {len(texts)} vectors")
-        return index, embeddings
+    st.session_state.status_text.text("Creating embeddings...")
+    st.session_state.progress_bar.progress(0)
     
-    def process_all(self):
-        """Process all data and return results."""
-        # Load Excel files
-        df = self.load_excel_files()
-        if df.empty:
-            return None, None, None, None
-        
-        # Preprocess
-        df = self.preprocess_data()
-        if df.empty:
-            return None, None, None, None
-        
-        # Create clusters
-        df = self.create_clusters()
-        
-        # Create search index
-        index, embeddings = self.create_faiss_index()
-        
-        return df, index, embeddings, self.cluster_names
+    # Create embeddings
+    embeddings = get_embedding_batch(df_combined['Question (English)'].tolist())
+    
+    # Create FAISS index
+    st.session_state.status_text.text("Building search index...")
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    
+    # Get topics
+    services = sorted(df_combined["Service"].unique().tolist())
+    topics = ["All Topics"] + services
+    
+    # Metadata
+    metadata = {
+        'total_faqs': len(df_combined),
+        'total_services': len(services),
+        'processed_date': pd.Timestamp.now().isoformat()
+    }
+    
+    return df_combined, index, embeddings, metadata, topics
 
 # Page configuration
 st.set_page_config(
@@ -339,7 +307,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS (same as before)
+# Custom CSS
 st.markdown("""
 <style>
     .main-title {
@@ -431,10 +399,10 @@ if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
 if 'show_sources' not in st.session_state:
     st.session_state.show_sources = True
-if 'data_processed' not in st.session_state:
-    st.session_state.data_processed = False
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
 
-# Functions for chat functionality
+# Chat functions
 def detect_language(text):
     """Detect if text is in Arabic or English."""
     arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
@@ -460,36 +428,30 @@ def translate_text(text, target_language):
         
         return response.choices[0].message.content
     except Exception as e:
-        st.error(f"Translation error: {str(e)}")
         return text
 
-def search_faqs_with_faiss(query, df, index, embeddings, topic=None, top_k=5):
-    """Search FAQs using FAISS index."""
+def search_faqs_optimized(query, df, index, topic=None, top_k=3):
+    """Optimized FAQ search using FAISS."""
     if df.empty or not query or index is None:
         return []
     
-    # Filter by topic if specified
-    if topic and topic != "All Topics":
-        filtered_df = df[df['Service'] == topic]
-        if len(filtered_df) == 0:
-            filtered_df = df
-    else:
-        filtered_df = df
-    
     try:
         # Get query embedding
-        processor = CloudDataProcessor()
-        query_embedding = np.array(processor.get_embedding(query)).reshape(1, -1).astype('float32')
+        response = openai.Embedding.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = np.array(response["data"][0]["embedding"]).reshape(1, -1).astype('float32')
         
         # Search FAISS index
-        distances, indices = index.search(query_embedding, min(top_k * 2, len(df)))
+        distances, indices = index.search(query_embedding, min(top_k * 3, len(df)))
         
         results = []
         for i, idx in enumerate(indices[0]):
             if idx < len(df):
                 row = df.iloc[idx]
                 
-                # Skip if topic filter doesn't match
+                # Filter by topic if specified
                 if topic and topic != "All Topics" and row['Service'] != topic:
                     continue
                 
@@ -497,7 +459,7 @@ def search_faqs_with_faiss(query, df, index, embeddings, topic=None, top_k=5):
                     'question': row['Question (English)'],
                     'answer': row['Answer (English)'],
                     'service': row['Service'],
-                    'module': row['Module'] if 'Module' in row and not pd.isna(row['Module']) else "",
+                    'module': row['Module'] if not pd.isna(row['Module']) else "",
                     'relevance': 1 - (distances[0][i] / 10),
                     'debug_info': {
                         'idx': idx,
@@ -589,9 +551,9 @@ def create_source_explanation(query, relevant_faqs, language="english"):
             explanation = f"📚 Source: This answer is based on the FAQ question '{relevant_faqs[0]['question']}' from the {relevant_faqs[0]['service']} service."
         else:
             explanation = "📚 Sources: This answer is based on the following FAQ questions:\n"
-            for i, faq in enumerate(relevant_faqs[:3]):
+            for i, faq in enumerate(relevant_faqs):
                 explanation += f"{i+1}. '{faq['question']}' from {faq['service']}"
-                if i < len(relevant_faqs[:3]) - 1:
+                if i < len(relevant_faqs) - 1:
                     explanation += "\n"
     else:  # Arabic
         if len(relevant_faqs) == 1:
@@ -599,9 +561,9 @@ def create_source_explanation(query, relevant_faqs, language="english"):
             explanation = translate_text(base_explanation, "arabic")
         else:
             base_explanation = "📚 المصادر: تستند هذه الإجابة إلى أسئلة الأسئلة الشائعة التالية:\n"
-            for i, faq in enumerate(relevant_faqs[:3]):
+            for i, faq in enumerate(relevant_faqs):
                 base_explanation += f"{i+1}. '{faq['question']}' من {faq['service']}"
-                if i < len(relevant_faqs[:3]) - 1:
+                if i < len(relevant_faqs) - 1:
                     base_explanation += "\n"
             explanation = translate_text(base_explanation, "arabic")
     
@@ -629,28 +591,66 @@ def main():
     st.markdown('<h1 class="main-title">DLD FAQ Assistant</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-title">Ask me anything about Dubai Land Department services</p>', unsafe_allow_html=True)
     
-    # Check if data needs to be processed
-    if not st.session_state.data_processed:
-        st.info("🚀 **First-time setup**: Processing your Excel files to create embeddings and search index...")
+    # Load or process data
+    if not st.session_state.data_loaded:
+        # Check current data hash
+        current_hash = get_data_hash("data")
         
-        with st.spinner("Processing data... This may take a few minutes."):
-            processor = CloudDataProcessor()
-            df, index, embeddings, cluster_names = processor.process_all()
+        if current_hash is None:
+            st.error("❌ No Excel files found in 'data' directory!")
+            st.stop()
+        
+        # Try to load cached data first
+        st.info("🔍 Checking for cached data...")
+        cached_df, cached_index, cached_embeddings, cached_metadata, cached_topics = load_cached_data()
+        
+        # Check if cached data is valid
+        cache_valid = (
+            cached_df is not None and
+            cached_metadata is not None and
+            cached_metadata.get('data_hash') == current_hash
+        )
+        
+        if cache_valid:
+            # Use cached data
+            st.success("✅ Loaded cached data instantly!")
+            st.session_state.faq_data = cached_df
+            st.session_state.search_index = cached_index
+            st.session_state.embeddings = cached_embeddings
+            st.session_state.topics = cached_topics
+            st.session_state.data_loaded = True
+        else:
+            # Process data fresh
+            st.info("🚀 Processing Excel files (first time or data changed)...")
             
-            if df is not None and not df.empty:
+            # Create progress indicators
+            progress_container = st.container()
+            with progress_container:
+                st.session_state.progress_bar = st.progress(0)
+                st.session_state.status_text = st.empty()
+            
+            df, index, embeddings, metadata, topics = process_excel_files()
+            
+            if df is not None:
+                # Add data hash to metadata
+                metadata['data_hash'] = current_hash
+                
+                # Save to cache
+                if save_processed_data(df, index, embeddings, metadata, topics):
+                    st.success("✅ Data processed and cached successfully!")
+                
+                # Update session state
                 st.session_state.faq_data = df
                 st.session_state.search_index = index
                 st.session_state.embeddings = embeddings
+                st.session_state.topics = topics
+                st.session_state.data_loaded = True
                 
-                # Get topics from services
-                services = sorted(df["Service"].unique().tolist())
-                st.session_state.topics = ["All Topics"] + services
-                
-                st.session_state.data_processed = True
-                st.success("🎉 Data processing complete! You can now ask questions.")
+                # Clear progress indicators
+                progress_container.empty()
                 st.rerun()
             else:
-                st.error("❌ Failed to process data. Please check your Excel files.")
+                st.error("❌ Failed to process data")
                 st.stop()
     
     # Sidebar
@@ -672,7 +672,7 @@ def main():
         
         st.markdown('<div class="sidebar-header">System Status</div>', unsafe_allow_html=True)
         if st.session_state.faq_data is not None and not st.session_state.faq_data.empty:
-            num_topics = len(st.session_state.topics) - 1  # Exclude "All Topics"
+            num_topics = len(st.session_state.topics) - 1
             st.info(f"📚 {len(st.session_state.faq_data)} FAQ items across {num_topics} topics")
             st.success("✅ Real FAQ data with embeddings loaded")
         else:
@@ -683,11 +683,13 @@ def main():
             st.session_state.messages = []
             st.rerun()
         
-        if st.button("🔄 Reprocess Data", use_container_width=True):
-            st.session_state.data_processed = False
-            st.session_state.faq_data = None
-            st.session_state.search_index = None
-            st.session_state.embeddings = None
+        if st.button("🔄 Rebuild Cache", use_container_width=True):
+            st.session_state.data_loaded = False
+            # Clear cache
+            cache_dir = "processed_cache"
+            if os.path.exists(cache_dir):
+                import shutil
+                shutil.rmtree(cache_dir)
             st.rerun()
     
     # Display chat messages
@@ -712,11 +714,6 @@ def main():
                 if st.session_state.debug_mode and debug_info:
                     st.markdown(f'<div class="debug-info">{debug_info}</div>', unsafe_allow_html=True)
     
-    # No FAQ data warning
-    if st.session_state.faq_data is None or st.session_state.faq_data.empty:
-        st.warning("Please wait for data processing to complete.")
-        return
-    
     # User input
     user_query = st.chat_input("Type your question here...")
     
@@ -740,12 +737,11 @@ def main():
             else:
                 english_query = user_query
             
-            # Search for relevant FAQs using FAISS
-            relevant_faqs = search_faqs_with_faiss(
+            # Search for relevant FAQs
+            relevant_faqs = search_faqs_optimized(
                 english_query,
                 st.session_state.faq_data,
                 st.session_state.search_index,
-                st.session_state.embeddings,
                 st.session_state.selected_topic
             )
             
