@@ -686,7 +686,7 @@ def main():
         show_sources = st.checkbox("📚 Show Sources", value=True)
         
         # API Test Button
-        if st.button("🧪 Test OpenAI API"):
+        if st.button("Quick test for our Agents"):
             with st.spinner("Testing API..."):
                 test_results = test_openai_api(client)
                 if test_results['chat_completion_works'] and test_results['embedding_works']:
