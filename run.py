@@ -761,8 +761,17 @@ def main():
             
             # Show sources if available
             if show_sources and "sources" in message:
-                sources_text = "📚 **Sources:** " + ", ".join([f"{s['question'][:50]}..." for s in message["sources"]])
-                st.markdown(f'<div class="source-info">{sources_text}</div>', unsafe_allow_html=True)
+                st.markdown('<div class="source-info">', unsafe_allow_html=True)
+                st.markdown("📚 **Sources:**")
+                for i, source in enumerate(message["sources"], 1):
+                    with st.expander(f"Source {i}: {source['question'][:60]}..." if len(source['question']) > 60 else f"Source {i}: {source['question']}", expanded=False):
+                        st.markdown(f"**📋 Service:** {source['service']}")
+                        st.markdown(f"**❓ Question:** {source['question']}")
+                        st.markdown(f"**✅ Answer:** {source['answer']}")
+                        st.markdown(f"**📄 File:** {source['source_file']}")
+                        st.markdown(f"**🎯 Relevance Score:** {source['similarity_score']:.3f}")
+                        st.markdown(f"**🔍 Search Method:** {source['method']}")
+                st.markdown('</div>', unsafe_allow_html=True)
             
             # Show debug info if enabled
             if st.session_state.debug_mode and "debug_info" in message:
