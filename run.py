@@ -19,93 +19,7 @@ def setup_openai():
                 api_key = st.secrets['openai']['OPENAI_API_KEY']
             elif 'OPENAI_API_KEY' in st.secrets:
                 api_key = st.secrets['OPENAI_API_KEY']
-            # else:
-            # # st.error("❌ No FAQ data loaded")
-            # st.info("Please add Excel files to the 'data' directory")
-        
-        if st.button("🔄 Reset Chat", use_container_width=True):
-            st.session_state.messages = []
-            st.rerun()
-    
-    # Main chat interface
-    st.markdown("---")
-    
-    # Display chat messages
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f'<div class="user-message">👤 **You:** {message["content"]}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="bot-message">🏢 **DLD Assistant:** {message["content"]}</div>', unsafe_allow_html=True)
-            
-            # Show sources if available
-            if show_sources and "sources" in message:
-                sources_text = "📚 **Sources:** " + ", ".join([f"{s['question'][:50]}..." for s in message["sources"]])
-                st.markdown(f'<div class="source-info">{sources_text}</div>', unsafe_allow_html=True)
-            
-            # Show debug info if enabled
-            if st.session_state.debug_mode and "debug_info" in message:
-                debug_text = f"🔧 **Debug:** {message['debug_info']}"
-                st.markdown(f'<div class="debug-info">{debug_text}</div>', unsafe_allow_html=True)
-    
-    # Chat input
-    if st.session_state.faq_data.empty:
-        st.warning("Please add Excel files to the 'data' directory to start chatting")
-    else:
-        user_input = st.chat_input("Ask me about Dubai Land Department services...")
-        
-        if user_input:
-            # Add user message
-            st.session_state.messages.append({"role": "user", "content": user_input})
-            
-            # Process the query
-            with st.spinner("Searching for answer..."):
-                # Choose search method
-                if st.session_state.use_embeddings and st.session_state.embeddings is not None:
-                    print("[DEBUG] Using semantic search with embeddings")
-                    search_results = semantic_search_with_embeddings(
-                        user_input, 
-                        st.session_state.faq_data, 
-                        st.session_state.embeddings, 
-                        client
-                    )
-                    search_method = "Semantic Search"
-                else:
-                    print("[DEBUG] Using text-based search")
-                    search_results = text_based_search(
-                        user_input, 
-                        st.session_state.faq_data, 
-                        selected_topic
-                    )
-                    search_method = "Text Search"
-                
-                # Generate response
-                response = generate_response(user_input, search_results, search_method, client)
-                
-                # Prepare message data
-                message_data = {
-                    "role": "assistant", 
-                    "content": response
-                }
-                
-                # Add sources
-                if search_results:
-                    message_data["sources"] = search_results
-                
-                # Add debug info
-                if st.session_state.debug_mode:
-                    debug_info = f"Method: {search_method}, Results: {len(search_results)}"
-                    if search_results:
-                        debug_info += f", Top score: {search_results[0]['similarity_score']:.3f}"
-                    message_data["debug_info"] = debug_info
-                
-                # Add assistant message
-                st.session_state.messages.append(message_data)
-            
-            # Rerun to show the new messages
-            st.rerun()
-
-if __name__ == "__main__":
-    main()
+            else:
                 st.sidebar.error("❌ No OpenAI API key found in secrets!")
                 return None
         else:
@@ -828,3 +742,89 @@ def main():
                         st.write(f"**Total rows**: {summary['final_total_rows']}")
                         st.write(f"**Duplicates removed**: {summary['duplicates_removed']}")
         else:
+            st.error("❌ No FAQ data loaded")
+            st.info("Please add Excel files to the 'data' directory")
+        
+        if st.button("🔄 Reset Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    
+    # Main chat interface
+    st.markdown("---")
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.markdown(f'<div class="user-message">👤 **You:** {message["content"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="bot-message">🏢 **DLD Assistant:** {message["content"]}</div>', unsafe_allow_html=True)
+            
+            # Show sources if available
+            if show_sources and "sources" in message:
+                sources_text = "📚 **Sources:** " + ", ".join([f"{s['question'][:50]}..." for s in message["sources"]])
+                st.markdown(f'<div class="source-info">{sources_text}</div>', unsafe_allow_html=True)
+            
+            # Show debug info if enabled
+            if st.session_state.debug_mode and "debug_info" in message:
+                debug_text = f"🔧 **Debug:** {message['debug_info']}"
+                st.markdown(f'<div class="debug-info">{debug_text}</div>', unsafe_allow_html=True)
+    
+    # Chat input
+    if st.session_state.faq_data.empty:
+        st.warning("Please add Excel files to the 'data' directory to start chatting")
+    else:
+        user_input = st.chat_input("Ask me about Dubai Land Department services...")
+        
+        if user_input:
+            # Add user message
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            
+            # Process the query
+            with st.spinner("Searching for answer..."):
+                # Choose search method
+                if st.session_state.use_embeddings and st.session_state.embeddings is not None:
+                    print("[DEBUG] Using semantic search with embeddings")
+                    search_results = semantic_search_with_embeddings(
+                        user_input, 
+                        st.session_state.faq_data, 
+                        st.session_state.embeddings, 
+                        client
+                    )
+                    search_method = "Semantic Search"
+                else:
+                    print("[DEBUG] Using text-based search")
+                    search_results = text_based_search(
+                        user_input, 
+                        st.session_state.faq_data, 
+                        selected_topic
+                    )
+                    search_method = "Text Search"
+                
+                # Generate response
+                response = generate_response(user_input, search_results, search_method, client)
+                
+                # Prepare message data
+                message_data = {
+                    "role": "assistant", 
+                    "content": response
+                }
+                
+                # Add sources
+                if search_results:
+                    message_data["sources"] = search_results
+                
+                # Add debug info
+                if st.session_state.debug_mode:
+                    debug_info = f"Method: {search_method}, Results: {len(search_results)}"
+                    if search_results:
+                        debug_info += f", Top score: {search_results[0]['similarity_score']:.3f}"
+                    message_data["debug_info"] = debug_info
+                
+                # Add assistant message
+                st.session_state.messages.append(message_data)
+            
+            # Rerun to show the new messages
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
