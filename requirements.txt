@@ -1,9 +1,5 @@
+
 streamlit
 openai
-python-dotenv
 pandas
 openpyxl
-numpy
-regex
-faiss-cpu
-scikit-learn
