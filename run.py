@@ -8,33 +8,144 @@ import numpy as np
 import json
 
 # =============================================================================
-# OPENAI API TESTING AND SETUP
+# OPENAI v1.0+ API SETUP AND TESTING
 # =============================================================================
 
-def test_openai_api():
-    """Test OpenAI API with both ChatCompletion and Embedding."""
-    print("[DEBUG] Testing OpenAI API...")
+def setup_openai():
+    """Setup OpenAI API v1.0+ with testing."""
+    try:
+        if hasattr(st, 'secrets'):
+            if 'openai' in st.secrets and 'OPENAI_API_KEY' in st.secrets['openai']:
+                api_key = st.secrets['openai']['OPENAI_API_KEY']
+            elif 'OPENAI_API_KEY' in st.secrets:
+                api_key = st.secrets['OPENAI_API_KEY']
+            else:
+            st.error("❌ No FAQ data loaded")
+            st.info("Please add Excel files to the 'data' directory")
+        
+        if st.button("🔄 Reset Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    
+    # Main chat interface
+    st.markdown("---")
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.markdown(f'<div class="user-message">👤 **You:** {message["content"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="bot-message">🏢 **DLD Assistant:** {message["content"]}</div>', unsafe_allow_html=True)
+            
+            # Show sources if available
+            if show_sources and "sources" in message:
+                sources_text = "📚 **Sources:** " + ", ".join([f"{s['question'][:50]}..." for s in message["sources"]])
+                st.markdown(f'<div class="source-info">{sources_text}</div>', unsafe_allow_html=True)
+            
+            # Show debug info if enabled
+            if st.session_state.debug_mode and "debug_info" in message:
+                debug_text = f"🔧 **Debug:** {message['debug_info']}"
+                st.markdown(f'<div class="debug-info">{debug_text}</div>', unsafe_allow_html=True)
+    
+    # Chat input
+    if st.session_state.faq_data.empty:
+        st.warning("Please add Excel files to the 'data' directory to start chatting")
+    else:
+        user_input = st.chat_input("Ask me about Dubai Land Department services...")
+        
+        if user_input:
+            # Add user message
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            
+            # Process the query
+            with st.spinner("Searching for answer..."):
+                # Choose search method
+                if st.session_state.use_embeddings and st.session_state.embeddings is not None:
+                    print("[DEBUG] Using semantic search with embeddings")
+                    search_results = semantic_search_with_embeddings(
+                        user_input, 
+                        st.session_state.faq_data, 
+                        st.session_state.embeddings, 
+                        client
+                    )
+                    search_method = "Semantic Search"
+                else:
+                    print("[DEBUG] Using text-based search")
+                    search_results = text_based_search(
+                        user_input, 
+                        st.session_state.faq_data, 
+                        selected_topic
+                    )
+                    search_method = "Text Search"
+                
+                # Generate response
+                response = generate_response(user_input, search_results, search_method, client)
+                
+                # Prepare message data
+                message_data = {
+                    "role": "assistant", 
+                    "content": response
+                }
+                
+                # Add sources
+                if search_results:
+                    message_data["sources"] = search_results
+                
+                # Add debug info
+                if st.session_state.debug_mode:
+                    debug_info = f"Method: {search_method}, Results: {len(search_results)}"
+                    if search_results:
+                        debug_info += f", Top score: {search_results[0]['similarity_score']:.3f}"
+                    message_data["debug_info"] = debug_info
+                
+                # Add assistant message
+                st.session_state.messages.append(message_data)
+            
+            # Rerun to show the new messages
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
+                st.sidebar.error("❌ No OpenAI API key found in secrets!")
+                return None
+        else:
+            st.sidebar.error("❌ No secrets found!")
+            return None
+        
+        # Initialize OpenAI client with v1.0+ syntax
+        client = openai.OpenAI(api_key=api_key)
+        print(f"[DEBUG] OpenAI client initialized with key: {api_key[:10]}...")
+        
+        return client
+        
+    except Exception as e:
+        st.sidebar.error(f"❌ Error setting up OpenAI: {str(e)}")
+        print(f"[DEBUG] OpenAI setup error: {str(e)}")
+        return None
+
+def test_openai_api(client):
+    """Test OpenAI API v1.0+ with both ChatCompletion and Embedding."""
+    print("[DEBUG] Testing OpenAI API v1.0+...")
     
     test_results = {
-        'api_key_configured': False,
+        'client_initialized': False,
         'chat_completion_works': False,
         'embedding_works': False,
         'errors': []
     }
     
     try:
-        # Check if API key is configured
-        if not openai.api_key:
-            test_results['errors'].append("No API key configured")
+        if not client:
+            test_results['errors'].append("No OpenAI client available")
             return test_results
         
-        test_results['api_key_configured'] = True
-        print(f"[DEBUG] API key configured: {openai.api_key[:10]}...")
+        test_results['client_initialized'] = True
+        print("[DEBUG] OpenAI client available")
         
-        # Test ChatCompletion
+        # Test ChatCompletion with v1.0+ syntax
         try:
-            print("[DEBUG] Testing ChatCompletion...")
-            response = openai.ChatCompletion.create(
+            print("[DEBUG] Testing chat.completions.create...")
+            response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Say 'API test successful'"}],
                 max_tokens=10
@@ -46,10 +157,10 @@ def test_openai_api():
             test_results['errors'].append(error_msg)
             print(f"[DEBUG] {error_msg}")
         
-        # Test Embedding
+        # Test Embedding with v1.0+ syntax
         try:
-            print("[DEBUG] Testing Embedding...")
-            response = openai.Embedding.create(
+            print("[DEBUG] Testing embeddings.create...")
+            response = client.embeddings.create(
                 model="text-embedding-3-small",
                 input="test embedding"
             )
@@ -66,41 +177,6 @@ def test_openai_api():
         print(f"[DEBUG] {error_msg}")
     
     return test_results
-
-def setup_openai():
-    """Setup OpenAI API with testing."""
-    try:
-        if hasattr(st, 'secrets'):
-            if 'openai' in st.secrets and 'OPENAI_API_KEY' in st.secrets['openai']:
-                api_key = st.secrets['openai']['OPENAI_API_KEY']
-            elif 'OPENAI_API_KEY' in st.secrets:
-                api_key = st.secrets['OPENAI_API_KEY']
-            else:
-                st.sidebar.error("❌ No OpenAI API key found in secrets!")
-                return None
-        else:
-            st.sidebar.error("❌ No secrets found!")
-            return None
-        
-        openai.api_key = api_key
-        print(f"[DEBUG] OpenAI API key configured: {api_key[:10]}...")
-        
-        # Test the API
-        test_results = test_openai_api()
-        
-        if test_results['chat_completion_works'] and test_results['embedding_works']:
-            st.sidebar.success("✅ OpenAI API working properly")
-            return api_key
-        else:
-            st.sidebar.error("❌ OpenAI API issues detected")
-            for error in test_results['errors']:
-                st.sidebar.error(f"• {error}")
-            return None
-        
-    except Exception as e:
-        st.sidebar.error(f"❌ Error setting up OpenAI: {str(e)}")
-        print(f"[DEBUG] OpenAI setup error: {str(e)}")
-        return None
 
 # =============================================================================
 # DATA LOADER
@@ -242,7 +318,7 @@ def load_excel_data():
         return pd.DataFrame(), [], file_stats
 
 # =============================================================================
-# EMBEDDING SYSTEM (FIXED)
+# EMBEDDING SYSTEM (v1.0+ API)
 # =============================================================================
 
 def check_embeddings_exist():
@@ -283,8 +359,8 @@ def save_embeddings(embeddings, metadata):
         print(f"[DEBUG] Error saving embeddings: {str(e)}")
         return False
 
-def create_embeddings_for_df(df):
-    """Create embeddings for all questions in the dataframe."""
+def create_embeddings_for_df(df, client):
+    """Create embeddings for all questions using v1.0+ API."""
     print(f"[DEBUG] Starting embedding creation for {len(df)} questions")
     
     questions = df['Question'].tolist()
@@ -293,7 +369,7 @@ def create_embeddings_for_df(df):
     # Create progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
-    batch_size = 5  # Very small batches to avoid rate limits
+    batch_size = 5  # Small batches to avoid rate limits
     
     total_batches = (len(questions) + batch_size - 1) // batch_size
     print(f"[DEBUG] Processing {total_batches} batches of {batch_size} questions each")
@@ -307,13 +383,14 @@ def create_embeddings_for_df(df):
         progress_bar.progress(batch_num / total_batches)
         
         try:
-            print(f"[DEBUG] Calling OpenAI Embedding.create for batch {batch_num}")
-            response = openai.Embedding.create(
+            print(f"[DEBUG] Calling client.embeddings.create for batch {batch_num}")
+            # Using v1.0+ API syntax
+            response = client.embeddings.create(
                 model="text-embedding-3-small",
                 input=batch_questions
             )
             
-            batch_embeddings = [item["embedding"] for item in response["data"]]
+            batch_embeddings = [item.embedding for item in response.data]
             embeddings.extend(batch_embeddings)
             
             print(f"[DEBUG] Batch {batch_num} completed successfully - got {len(batch_embeddings)} embeddings")
@@ -352,20 +429,20 @@ def create_embeddings_for_df(df):
     
     return embeddings_array, metadata
 
-def semantic_search_with_embeddings(query, df, embeddings, top_k=3):
-    """Perform semantic search using embeddings - FIXED VERSION."""
+def semantic_search_with_embeddings(query, df, embeddings, client, top_k=3):
+    """Perform semantic search using embeddings with v1.0+ API."""
     print(f"[DEBUG] Starting semantic search for: '{query}'")
     print(f"[DEBUG] DataFrame shape: {df.shape}")
     print(f"[DEBUG] Embeddings shape: {embeddings.shape}")
     
     try:
-        # Get query embedding using the correct API
-        print("[DEBUG] Getting query embedding with openai.Embedding.create...")
-        response = openai.Embedding.create(
+        # Get query embedding using v1.0+ API
+        print("[DEBUG] Getting query embedding with client.embeddings.create...")
+        response = client.embeddings.create(
             model="text-embedding-3-small",
             input=query
         )
-        query_embedding = np.array(response["data"][0]["embedding"]).astype('float32')
+        query_embedding = np.array(response.data[0].embedding).astype('float32')
         print(f"[DEBUG] Query embedding shape: {query_embedding.shape}")
         
         # Calculate similarities (cosine similarity)
@@ -489,11 +566,11 @@ def text_based_search(query, df, topic=None, top_k=3):
     return results[:top_k]
 
 # =============================================================================
-# RESPONSE GENERATION
+# RESPONSE GENERATION (v1.0+ API)
 # =============================================================================
 
-def generate_response(query, search_results, search_method):
-    """Generate response with method tracking."""
+def generate_response(query, search_results, search_method, client):
+    """Generate response using v1.0+ API."""
     print(f"[DEBUG] Generating response using {search_method} with {len(search_results)} results")
     
     if not search_results:
@@ -515,7 +592,7 @@ def generate_response(query, search_results, search_method):
         context += f"Confidence: {result['similarity_score']:.3f}\n"
     
     try:
-        print("[DEBUG] Calling openai.ChatCompletion.create for response generation")
+        print("[DEBUG] Calling client.chat.completions.create for response generation")
         system_prompt = """You are a helpful assistant for the Dubai Land Department. 
         Based on the provided FAQ information, give a clear and helpful answer to the user's question.
         Use a professional but friendly tone. Only use information from the provided FAQs.
@@ -526,7 +603,8 @@ def generate_response(query, search_results, search_method):
         3. Mention relevant services or processes
         4. If information is incomplete, acknowledge it"""
         
-        response = openai.ChatCompletion.create(
+        # Using v1.0+ API syntax
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -623,9 +701,9 @@ def main():
     st.markdown('<h1 class="main-title">🏢 DLD FAQ Assistant</h1>', unsafe_allow_html=True)
     st.markdown("### Ask me anything about Dubai Land Department services")
     
-    # Setup OpenAI with testing
-    api_key = setup_openai()
-    if not api_key:
+    # Setup OpenAI v1.0+ client
+    client = setup_openai()
+    if not client:
         st.error("Please configure your OpenAI API key in Streamlit secrets.")
         st.info("""
         **To configure secrets:**
@@ -656,6 +734,8 @@ def main():
         st.session_state.embeddings_metadata = None
     if 'use_embeddings' not in st.session_state:
         st.session_state.use_embeddings = False
+    if 'openai_client' not in st.session_state:
+        st.session_state.openai_client = client
     
     # Load data (fast startup)
     if st.session_state.faq_data is None:
@@ -694,7 +774,7 @@ def main():
         # API Test Button
         if st.button("🧪 Test OpenAI API"):
             with st.spinner("Testing API..."):
-                test_results = test_openai_api()
+                test_results = test_openai_api(client)
                 if test_results['chat_completion_works'] and test_results['embedding_works']:
                     st.success("✅ All API functions working!")
                 else:
@@ -704,9 +784,6 @@ def main():
         
         # Embedding controls
         st.markdown("### 🧠 AI Search Mode")
-        
-        print(f"[DEBUG] Current embeddings state: {st.session_state.embeddings is not None}")
-        print(f"[DEBUG] Use embeddings setting: {st.session_state.use_embeddings}")
         
         if st.session_state.embeddings is not None:
             st.markdown('<div class="embedding-status embedding-enabled">✅ Semantic Search Active</div>', unsafe_allow_html=True)
@@ -720,8 +797,6 @@ def main():
                 index=0 if st.session_state.use_embeddings else 1
             )
             st.session_state.use_embeddings = (use_semantic == "🧠 Semantic Search (AI)")
-            print(f"[DEBUG] Search method selected: {use_semantic}")
-            print(f"[DEBUG] Use embeddings now set to: {st.session_state.use_embeddings}")
             
         else:
             st.markdown('<div class="embedding-status embedding-disabled">📝 Text Search Mode</div>', unsafe_allow_html=True)
@@ -729,7 +804,7 @@ def main():
             if not st.session_state.faq_data.empty:
                 if st.button("🚀 Create AI Embeddings", use_container_width=True):
                     with st.spinner("Creating embeddings... This will take 2-3 minutes."):
-                        embeddings, metadata = create_embeddings_for_df(st.session_state.faq_data)
+                        embeddings, metadata = create_embeddings_for_df(st.session_state.faq_data, client)
                         st.session_state.embeddings = embeddings
                         st.session_state.embeddings_metadata = metadata
                         st.session_state.use_embeddings = True
@@ -753,138 +828,3 @@ def main():
                         st.write(f"**Total rows**: {summary['final_total_rows']}")
                         st.write(f"**Duplicates removed**: {summary['duplicates_removed']}")
         else:
-            st.error("❌ No data loaded")
-        
-        if st.button("🔄 Reset Chat"):
-            st.session_state.messages = []
-            st.rerun()
-        
-        if st.session_state.embeddings is not None:
-            if st.button("🗑️ Clear Embeddings"):
-                try:
-                    os.remove("embeddings_cache.npy")
-                    os.remove("embeddings_metadata.json")
-                except:
-                    pass
-                st.session_state.embeddings = None
-                st.session_state.embeddings_metadata = None
-                st.session_state.use_embeddings = False
-                st.success("Embeddings cleared! App will use text search.")
-                st.rerun()
-    
-    # Display chat messages
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f'<div class="user-message">👤 {message["content"]}</div>', unsafe_allow_html=True)
-        else:
-            content = message["content"]
-            sources = message.get("sources", "")
-            debug_info = message.get("debug_info", "")
-            
-            st.markdown(f'<div class="bot-message">🏢 {content}</div>', unsafe_allow_html=True)
-            
-            if show_sources and sources:
-                st.markdown(f'<div class="source-info">{sources}</div>', unsafe_allow_html=True)
-            
-            if st.session_state.debug_mode and debug_info:
-                st.markdown(f'<div class="debug-info">{debug_info}</div>', unsafe_allow_html=True)
-    
-    # User input
-    if st.session_state.faq_data.empty:
-        st.warning("Please wait for data to load.")
-        return
-    
-    user_input = st.chat_input("Ask your question about DLD services...")
-    
-    if user_input:
-        print(f"[DEBUG] User input received: '{user_input}'")
-        print(f"[DEBUG] Current use_embeddings state: {st.session_state.use_embeddings}")
-        print(f"[DEBUG] Embeddings available: {st.session_state.embeddings is not None}")
-        
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        with st.spinner("Finding answer..."):
-            # Choose search method based on current settings
-            if st.session_state.use_embeddings and st.session_state.embeddings is not None:
-                print("[DEBUG] Using semantic search with embeddings")
-                search_results = semantic_search_with_embeddings(
-                    user_input, 
-                    st.session_state.faq_data, 
-                    st.session_state.embeddings
-                )
-                search_method = "Semantic Search (AI)"
-            else:
-                print("[DEBUG] Using text-based search")
-                search_results = text_based_search(
-                    user_input, 
-                    st.session_state.faq_data, 
-                    selected_topic
-                )
-                search_method = "Text Search"
-            
-            print(f"[DEBUG] Search completed with method: {search_method}")
-            print(f"[DEBUG] Number of results: {len(search_results)}")
-            
-            # Generate response
-            response = generate_response(user_input, search_results, search_method)
-            
-            # Create source information
-            sources = ""
-            debug_info = ""
-            
-            if search_results:
-                if len(search_results) == 1:
-                    result = search_results[0]
-                    sources = f"📚 **Source**: {result['service']} | **File**: {result['source_file']}\n"
-                    sources += f"**Question**: {result['question']}\n"
-                    sources += f"**Method**: {search_method}\n"
-                    sources += f"**Confidence**: {result['similarity_score']:.3f}"
-                else:
-                    sources = f"📚 **Sources**: {len(search_results)} results from {search_method}\n"
-                    for i, result in enumerate(search_results):
-                        sources += f"{i+1}. {result['service']} (Confidence: {result['similarity_score']:.3f})\n"
-                
-                # Debug information
-                if st.session_state.debug_mode:
-                    debug_info = f"🔍 **Search Details**:\n"
-                    debug_info += f"• Method: {search_method}\n"
-                    debug_info += f"• Query: '{user_input}'\n"
-                    debug_info += f"• Results found: {len(search_results)}\n"
-                    debug_info += f"• Topic filter: {selected_topic}\n"
-                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n"
-                    debug_info += f"• Use embeddings setting: {st.session_state.use_embeddings}\n\n"
-                    
-                    if search_results:
-                        debug_info += f"📊 **Top Result Details**:\n"
-                        top_result = search_results[0]
-                        debug_info += f"• Service: {top_result['service']}\n"
-                        debug_info += f"• Source file: {top_result['source_file']}\n"
-                        debug_info += f"• Search method: {top_result['method']}\n"
-                        debug_info += f"• Confidence score: {top_result['similarity_score']:.3f}\n"
-                        debug_info += f"• Rank: {top_result['rank']}\n"
-                        debug_info += f"• Question: {top_result['question'][:100]}...\n"
-            else:
-                # Debug info for no results
-                if st.session_state.debug_mode:
-                    debug_info = f"🔍 **Search Details**:\n"
-                    debug_info += f"• Method: {search_method}\n"
-                    debug_info += f"• Query: '{user_input}'\n"
-                    debug_info += f"• Results found: 0\n"
-                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n"
-                    debug_info += f"• Use embeddings setting: {st.session_state.use_embeddings}\n"
-            
-            print(f"[DEBUG] Response generated, adding to chat history")
-            
-            # Add bot response
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response,
-                "sources": sources,
-                "debug_info": debug_info
-            })
-        
-        st.rerun()
-
-if __name__ == "__main__":
-    main()
