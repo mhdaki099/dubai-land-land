@@ -4,6 +4,9 @@ import os
 import re
 import openai
 import time
+import numpy as np
+import json
+import pickle
 
 # =============================================================================
 # STREAMLIT CLOUD CONFIGURATION
@@ -27,10 +30,12 @@ def setup_openai():
             return None
         
         openai.api_key = api_key
+        print(f"[DEBUG] OpenAI API key configured: {api_key[:10]}...")
         return api_key
         
     except Exception as e:
         st.sidebar.error(f"❌ Error setting up OpenAI: {str(e)}")
+        print(f"[DEBUG] OpenAI setup error: {str(e)}")
         return None
 
 # =============================================================================
@@ -40,15 +45,19 @@ def setup_openai():
 @st.cache_data
 def load_excel_data():
     """Load Excel data with detailed tracking."""
+    print("[DEBUG] Starting Excel data loading...")
     data_dir = "data"
     
     if not os.path.exists(data_dir):
+        print(f"[DEBUG] Data directory '{data_dir}' not found!")
         st.error(f"❌ Data directory '{data_dir}' not found!")
         return pd.DataFrame(), [], {}
     
     excel_files = [f for f in os.listdir(data_dir) if f.endswith('.xlsx')]
+    print(f"[DEBUG] Found {len(excel_files)} Excel files: {excel_files}")
     
     if not excel_files:
+        print("[DEBUG] No Excel files found!")
         st.error(f"❌ No Excel files found in '{data_dir}' directory!")
         return pd.DataFrame(), [], {}
     
@@ -60,12 +69,14 @@ def load_excel_data():
     status_text = st.empty()
     
     for idx, filename in enumerate(excel_files):
+        print(f"[DEBUG] Processing file {idx+1}/{len(excel_files)}: {filename}")
         try:
             status_text.text(f"Loading {filename}...")
             progress_bar.progress((idx + 1) / len(excel_files))
             
             file_path = os.path.join(data_dir, filename)
             service_name = filename.replace('FAQs.xlsx', '').replace('.xlsx', '').strip()
+            print(f"[DEBUG] Service name extracted: {service_name}")
             
             # Try different header positions
             df = None
@@ -73,8 +84,10 @@ def load_excel_data():
             
             for header_row in [1, 2, 0]:
                 try:
+                    print(f"[DEBUG] Trying header row {header_row} for {filename}")
                     temp_df = pd.read_excel(file_path, header=header_row)
                     temp_df = temp_df.dropna(how='all')
+                    print(f"[DEBUG] Loaded {len(temp_df)} rows with columns: {list(temp_df.columns)}")
                     
                     # Look for question and answer columns
                     question_col = None
@@ -84,18 +97,23 @@ def load_excel_data():
                         col_str = str(col).lower()
                         if 'question' in col_str and 'eng' in col_str:
                             question_col = col
+                            print(f"[DEBUG] Found question column: {col}")
                         elif 'answer' in col_str and 'eng' in col_str:
                             answer_col = col
+                            print(f"[DEBUG] Found answer column: {col}")
                     
                     if question_col and answer_col:
                         df = temp_df
                         header_used = header_row
+                        print(f"[DEBUG] Successfully identified Q&A columns for {filename}")
                         break
                         
-                except Exception:
+                except Exception as e:
+                    print(f"[DEBUG] Header row {header_row} failed for {filename}: {str(e)}")
                     continue
             
             if df is not None and question_col and answer_col:
+                print(f"[DEBUG] Processing Q&A data for {filename}")
                 # Clean and prepare data
                 clean_df = df[[question_col, answer_col]].copy()
                 clean_df.columns = ['Question', 'Answer']
@@ -109,6 +127,8 @@ def load_excel_data():
                 clean_df = clean_df[clean_df['Answer'].str.len() > 10]
                 final_count = len(clean_df)
                 
+                print(f"[DEBUG] {filename}: {original_count} → {final_count} rows after cleaning")
+                
                 # Track statistics
                 file_stats[filename] = {
                     'service': service_name,
@@ -121,14 +141,17 @@ def load_excel_data():
                 
                 if final_count > 0:
                     all_data.append(clean_df)
+                    print(f"[DEBUG] Added {final_count} rows from {filename}")
                     
             else:
+                print(f"[DEBUG] Failed to process {filename} - no Q&A columns found")
                 file_stats[filename] = {
                     'service': service_name,
                     'error': 'Could not find question/answer columns'
                 }
                 
         except Exception as e:
+            print(f"[DEBUG] Exception processing {filename}: {str(e)}")
             file_stats[filename] = {
                 'service': service_name,
                 'error': str(e)
@@ -140,6 +163,7 @@ def load_excel_data():
     status_text.empty()
     
     if all_data:
+        print(f"[DEBUG] Combining data from {len(all_data)} files")
         combined_df = pd.concat(all_data, ignore_index=True)
         
         # Remove duplicates and track
@@ -147,8 +171,12 @@ def load_excel_data():
         combined_df = combined_df.drop_duplicates(subset=['Question'], keep='first')
         final_total = len(combined_df)
         
+        print(f"[DEBUG] Combined data: {original_total} → {final_total} rows (removed {original_total - final_total} duplicates)")
+        
         services = sorted(combined_df['Service'].unique().tolist())
         topics = ["All Topics"] + services
+        
+        print(f"[DEBUG] Services found: {services}")
         
         # Add processing stats
         file_stats['_summary'] = {
@@ -159,22 +187,179 @@ def load_excel_data():
             'duplicates_removed': original_total - final_total
         }
         
+        print(f"[DEBUG] Data loading complete: {final_total} FAQ items from {len(all_data)} files")
         st.success(f"✅ Loaded {final_total} FAQ items from {len(all_data)} files")
         return combined_df, topics, file_stats
     else:
+        print("[DEBUG] No valid data found in any Excel files")
         st.error("❌ No valid data found in Excel files")
         return pd.DataFrame(), [], file_stats
 
 # =============================================================================
-# ENHANCED SEARCH WITH DETAILED SCORING
+# EMBEDDING SYSTEM
 # =============================================================================
 
-def detailed_search(query, df, topic=None, top_k=3):
-    """Enhanced search with detailed scoring information."""
-    if df.empty or not query:
-        return [], {}
+def check_embeddings_exist():
+    """Check if embeddings are already cached."""
+    embeddings_file = "embeddings_cache.npy"
+    metadata_file = "embeddings_metadata.json"
+    return os.path.exists(embeddings_file) and os.path.exists(metadata_file)
+
+def load_cached_embeddings():
+    """Load cached embeddings if they exist."""
+    try:
+        print("[DEBUG] Loading cached embeddings...")
+        embeddings = np.load("embeddings_cache.npy")
+        
+        with open("embeddings_metadata.json", 'r') as f:
+            metadata = json.load(f)
+        
+        print(f"[DEBUG] Loaded {len(embeddings)} cached embeddings")
+        return embeddings, metadata
+    except Exception as e:
+        print(f"[DEBUG] Error loading cached embeddings: {str(e)}")
+        return None, None
+
+def save_embeddings(embeddings, metadata):
+    """Save embeddings to cache."""
+    try:
+        print("[DEBUG] Saving embeddings to cache...")
+        np.save("embeddings_cache.npy", embeddings)
+        
+        with open("embeddings_metadata.json", 'w') as f:
+            json.dump(metadata, f)
+        
+        print("[DEBUG] Embeddings saved successfully")
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Error saving embeddings: {str(e)}")
+        return False
+
+def create_embeddings_for_df(df):
+    """Create embeddings for all questions in the dataframe."""
+    print(f"[DEBUG] Starting embedding creation for {len(df)} questions")
     
-    start_time = time.time()
+    questions = df['Question'].tolist()
+    embeddings = []
+    
+    # Create progress tracking
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    batch_size = 10  # Small batches to avoid rate limits
+    
+    total_batches = (len(questions) + batch_size - 1) // batch_size
+    print(f"[DEBUG] Processing {total_batches} batches of {batch_size} questions each")
+    
+    for i in range(0, len(questions), batch_size):
+        batch_num = i // batch_size + 1
+        batch_questions = questions[i:i+batch_size]
+        
+        print(f"[DEBUG] Processing batch {batch_num}/{total_batches}")
+        status_text.text(f"Creating embeddings... Batch {batch_num}/{total_batches}")
+        progress_bar.progress(batch_num / total_batches)
+        
+        try:
+            print(f"[DEBUG] Calling OpenAI for batch {batch_num} with {len(batch_questions)} questions")
+            response = openai.Embedding.create(
+                model="text-embedding-3-small",
+                input=batch_questions
+            )
+            
+            batch_embeddings = [item["embedding"] for item in response["data"]]
+            embeddings.extend(batch_embeddings)
+            
+            print(f"[DEBUG] Batch {batch_num} completed successfully")
+            
+            # Small delay to respect rate limits
+            time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in batch {batch_num}: {str(e)}")
+            st.error(f"Error in batch {batch_num}: {str(e)}")
+            
+            # Add zero vectors as fallback
+            for _ in range(len(batch_questions)):
+                embeddings.append([0.0] * 1536)
+    
+    progress_bar.progress(1.0)
+    status_text.text("✅ Embeddings creation complete!")
+    
+    embeddings_array = np.array(embeddings).astype('float32')
+    print(f"[DEBUG] Created embeddings array with shape: {embeddings_array.shape}")
+    
+    # Save metadata
+    metadata = {
+        'total_questions': len(questions),
+        'embedding_dimension': embeddings_array.shape[1],
+        'model': 'text-embedding-3-small',
+        'created_at': time.time()
+    }
+    
+    # Save to cache
+    save_embeddings(embeddings_array, metadata)
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    return embeddings_array, metadata
+
+def semantic_search_with_embeddings(query, df, embeddings, top_k=3):
+    """Perform semantic search using embeddings."""
+    print(f"[DEBUG] Performing semantic search for: '{query}'")
+    
+    try:
+        # Get query embedding
+        print("[DEBUG] Getting query embedding...")
+        response = openai.Embedding.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = np.array(response["data"][0]["embedding"]).astype('float32')
+        
+        # Calculate similarities
+        print("[DEBUG] Calculating similarities...")
+        similarities = np.dot(embeddings, query_embedding)
+        
+        # Get top results
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        print(f"[DEBUG] Top {top_k} results found with similarities: {similarities[top_indices]}")
+        
+        results = []
+        for i, idx in enumerate(top_indices):
+            similarity_score = similarities[idx]
+            row = df.iloc[idx]
+            
+            results.append({
+                'question': row['Question'],
+                'answer': row['Answer'],
+                'service': row['Service'],
+                'source_file': row['Source_File'],
+                'similarity_score': float(similarity_score),
+                'rank': i + 1,
+                'method': 'semantic_embedding'
+            })
+            
+            print(f"[DEBUG] Result {i+1}: {similarity_score:.3f} - {row['Question'][:50]}...")
+        
+        return results
+        
+    except Exception as e:
+        print(f"[DEBUG] Error in semantic search: {str(e)}")
+        st.error(f"Semantic search error: {str(e)}")
+        return []
+
+# =============================================================================
+# TEXT-BASED SEARCH (FALLBACK)
+# =============================================================================
+
+def text_based_search(query, df, topic=None, top_k=3):
+    """Text-based search as fallback."""
+    print(f"[DEBUG] Performing text-based search for: '{query}'")
+    
+    if df.empty or not query:
+        return []
     
     # Filter by topic if specified
     search_df = df
@@ -182,6 +367,8 @@ def detailed_search(query, df, topic=None, top_k=3):
         search_df = df[df['Service'] == topic]
         if search_df.empty:
             search_df = df
+    
+    print(f"[DEBUG] Searching through {len(search_df)} documents")
     
     query_lower = query.lower()
     query_words = set(query_lower.split())
@@ -204,106 +391,71 @@ def detailed_search(query, df, topic=None, top_k=3):
         question = row['Question']
         question_lower = question.lower()
         question_words = set(question_lower.split())
-        answer = row['Answer']
-        service = row['Service']
         
-        # Calculate detailed scores
-        scoring_details = {
-            'exact_phrase': 0,
-            'word_overlap': 0,
-            'keyword_matches': 0,
-            'question_patterns': 0
-        }
+        # Calculate score
+        score = 0
         
-        # 1. Exact phrase matching
+        # Exact phrase matching
         if query_lower in question_lower:
-            scoring_details['exact_phrase'] = 20
+            score += 20
         
-        # 2. Word overlap
+        # Word overlap
         common_words = query_words.intersection(question_words)
-        scoring_details['word_overlap'] = len(common_words) * 5
+        score += len(common_words) * 5
         
-        # 3. Important keyword matching
-        keyword_score = 0
-        matched_keywords = []
+        # Keyword matching
         for category, keywords in important_keywords.items():
             query_has = any(kw in query_lower for kw in keywords)
             question_has = any(kw in question_lower for kw in keywords)
             if query_has and question_has:
-                keyword_score += 10
-                matched_keywords.append(category)
-        scoring_details['keyword_matches'] = keyword_score
+                score += 10
         
-        # 4. Question pattern matching
-        question_patterns = ['how', 'what', 'when', 'where', 'why', 'can', 'do', 'is']
-        pattern_score = 0
-        for pattern in question_patterns:
-            if pattern in query_lower and pattern in question_lower:
-                pattern_score += 3
-        scoring_details['question_patterns'] = pattern_score
-        
-        # Total score
-        total_score = sum(scoring_details.values())
-        
-        if total_score > 0:
+        if score > 0:
             results.append({
                 'question': question,
-                'answer': answer,
-                'service': service,
-                'source_file': row.get('Source_File', 'Unknown'),
-                'total_score': total_score,
-                'scoring_details': scoring_details,
-                'matched_keywords': matched_keywords,
-                'common_words': list(common_words)
+                'answer': row['Answer'],
+                'service': row['Service'],
+                'source_file': row['Source_File'],
+                'similarity_score': score / 100.0,  # Normalize to 0-1 range
+                'rank': 0,  # Will be set after sorting
+                'method': 'text_matching'
             })
     
-    # Sort by score
-    results.sort(key=lambda x: x['total_score'], reverse=True)
+    # Sort and rank
+    results.sort(key=lambda x: x['similarity_score'], reverse=True)
+    for i, result in enumerate(results[:top_k]):
+        result['rank'] = i + 1
     
-    search_time = time.time() - start_time
-    
-    search_stats = {
-        'query': query,
-        'search_time': search_time,
-        'total_documents_searched': len(search_df),
-        'results_found': len(results),
-        'top_score': results[0]['total_score'] if results else 0,
-        'topic_filter': topic
-    }
-    
-    return results[:top_k], search_stats
+    print(f"[DEBUG] Text search found {len(results)} results")
+    return results[:top_k]
 
 # =============================================================================
-# ENHANCED RESPONSE GENERATION
+# RESPONSE GENERATION
 # =============================================================================
 
-def generate_enhanced_response(query, search_results, show_debug=False):
-    """Generate response with optional debug information."""
+def generate_response(query, search_results, search_method):
+    """Generate response with method tracking."""
+    print(f"[DEBUG] Generating response using {search_method} with {len(search_results)} results")
+    
     if not search_results:
-        return "I'm sorry, I couldn't find an answer to your question. Could you please rephrase it or ask about Dubai Land Department services?", {}
+        return "I'm sorry, I couldn't find an answer to your question. Could you please rephrase it or ask about Dubai Land Department services?"
     
-    start_time = time.time()
+    # If single high-confidence result, return directly
+    if len(search_results) == 1 and search_results[0]['similarity_score'] > 0.8:
+        print("[DEBUG] Using direct answer from single high-confidence result")
+        return search_results[0]['answer']
     
-    # If we have a single, highly relevant result, return it directly
-    if len(search_results) == 1 and search_results[0]['total_score'] > 15:
-        response = search_results[0]['answer']
-        generation_stats = {
-            'method': 'direct_answer',
-            'generation_time': time.time() - start_time,
-            'openai_used': False
-        }
-        return response, generation_stats
-    
-    # Prepare context from search results
+    # Prepare context for OpenAI
     context = ""
     for i, result in enumerate(search_results):
         context += f"\nFAQ {i+1}:\n"
         context += f"Question: {result['question']}\n"
         context += f"Answer: {result['answer']}\n"
         context += f"Service: {result['service']}\n"
-        context += f"Relevance Score: {result['total_score']}\n"
+        context += f"Confidence: {result['similarity_score']:.3f}\n"
     
     try:
+        print("[DEBUG] Calling OpenAI for response generation")
         system_prompt = """You are a helpful assistant for the Dubai Land Department. 
         Based on the provided FAQ information, give a clear and helpful answer to the user's question.
         Use a professional but friendly tone. Only use information from the provided FAQs.
@@ -313,8 +465,6 @@ def generate_enhanced_response(query, search_results, show_debug=False):
         2. Be specific and actionable
         3. Mention relevant services or processes
         4. If information is incomplete, acknowledge it"""
-        
-        openai_start = time.time()
         
         response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -326,34 +476,21 @@ def generate_enhanced_response(query, search_results, show_debug=False):
             temperature=0.3
         )
         
-        openai_time = time.time() - openai_start
-        
-        generation_stats = {
-            'method': 'openai_synthesis',
-            'generation_time': time.time() - start_time,
-            'openai_time': openai_time,
-            'openai_used': True,
-            'model': 'gpt-4o',
-            'context_length': len(context)
-        }
-        
-        return response.choices[0].message.content, generation_stats
+        print("[DEBUG] OpenAI response generated successfully")
+        return response.choices[0].message.content
         
     except Exception as e:
-        # Fallback to best match
-        generation_stats = {
-            'method': 'fallback',
-            'generation_time': time.time() - start_time,
-            'openai_used': False,
-            'error': str(e)
-        }
-        return search_results[0]['answer'], generation_stats
+        print(f"[DEBUG] OpenAI generation error: {str(e)}")
+        # Fallback to best result
+        return search_results[0]['answer']
 
 # =============================================================================
 # STREAMLIT APP
 # =============================================================================
 
 def main():
+    print("[DEBUG] Starting main application")
+    
     # Page config
     st.set_page_config(
         page_title="DLD FAQ Chatbot",
@@ -391,9 +528,8 @@ def main():
             margin-top: 10px;
             font-style: italic;
             border-top: 1px dashed #ddd;
-            padding-top: 5px;
-            background-color: #f8f9fa;
             padding: 8px;
+            background-color: #f8f9fa;
             border-radius: 5px;
         }
         .debug-info {
@@ -401,10 +537,24 @@ def main():
             color: #666;
             margin-top: 10px;
             border-top: 1px solid #eee;
-            padding-top: 5px;
-            background-color: #fafafa;
             padding: 8px;
+            background-color: #fafafa;
             border-radius: 5px;
+        }
+        .embedding-status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .embedding-enabled {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .embedding-disabled {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -440,14 +590,34 @@ def main():
         st.session_state.file_stats = {}
     if 'debug_mode' not in st.session_state:
         st.session_state.debug_mode = False
+    if 'embeddings' not in st.session_state:
+        st.session_state.embeddings = None
+    if 'embeddings_metadata' not in st.session_state:
+        st.session_state.embeddings_metadata = None
+    if 'use_embeddings' not in st.session_state:
+        st.session_state.use_embeddings = False
     
-    # Load data
+    # Load data (fast startup)
     if st.session_state.faq_data is None:
         with st.spinner("Loading FAQ data..."):
+            print("[DEBUG] Loading FAQ data...")
             df, topics, file_stats = load_excel_data()
             st.session_state.faq_data = df
             st.session_state.topics = topics
             st.session_state.file_stats = file_stats
+            print("[DEBUG] FAQ data loaded into session state")
+    
+    # Check for existing embeddings
+    if st.session_state.embeddings is None:
+        print("[DEBUG] Checking for existing embeddings...")
+        if check_embeddings_exist():
+            print("[DEBUG] Found existing embeddings, loading...")
+            embeddings, metadata = load_cached_embeddings()
+            if embeddings is not None:
+                st.session_state.embeddings = embeddings
+                st.session_state.embeddings_metadata = metadata
+                st.session_state.use_embeddings = True
+                print("[DEBUG] Embeddings loaded from cache")
     
     # Sidebar
     with st.sidebar:
@@ -460,6 +630,37 @@ def main():
         st.markdown("### ⚙️ Settings")
         st.session_state.debug_mode = st.checkbox("🔍 Debug Mode", value=st.session_state.debug_mode)
         show_sources = st.checkbox("📚 Show Sources", value=True)
+        
+        # Embedding controls
+        st.markdown("### 🧠 AI Search Mode")
+        
+        if st.session_state.embeddings is not None:
+            st.markdown('<div class="embedding-status embedding-enabled">✅ Semantic Search Active</div>', unsafe_allow_html=True)
+            st.write(f"📊 {len(st.session_state.embeddings)} embeddings ready")
+            if st.session_state.embeddings_metadata:
+                st.write(f"🤖 Model: {st.session_state.embeddings_metadata.get('model', 'unknown')}")
+            
+            use_semantic = st.radio(
+                "Search method:",
+                ["🧠 Semantic Search (AI)", "📝 Text Search (Fast)"],
+                index=0 if st.session_state.use_embeddings else 1
+            )
+            st.session_state.use_embeddings = (use_semantic == "🧠 Semantic Search (AI)")
+            
+        else:
+            st.markdown('<div class="embedding-status embedding-disabled">📝 Text Search Mode</div>', unsafe_allow_html=True)
+            
+            if not st.session_state.faq_data.empty:
+                if st.button("🚀 Create AI Embeddings", use_container_width=True):
+                    with st.spinner("Creating embeddings... This will take 2-3 minutes."):
+                        embeddings, metadata = create_embeddings_for_df(st.session_state.faq_data)
+                        st.session_state.embeddings = embeddings
+                        st.session_state.embeddings_metadata = metadata
+                        st.session_state.use_embeddings = True
+                        st.success("✅ Embeddings created! Semantic search is now active.")
+                        st.rerun()
+                
+                st.info("💡 Create embeddings for AI-powered semantic search that understands meaning, not just keywords!")
         
         st.markdown("### ℹ️ System Status")
         if not st.session_state.faq_data.empty:
@@ -482,14 +683,18 @@ def main():
             st.session_state.messages = []
             st.rerun()
         
-        if st.session_state.debug_mode:
-            with st.expander("🔧 File Details"):
-                for filename, stats in st.session_state.file_stats.items():
-                    if not filename.startswith('_'):
-                        if 'error' in stats:
-                            st.error(f"❌ {filename}: {stats['error']}")
-                        else:
-                            st.success(f"✅ {filename}: {stats['final_rows']} rows")
+        if st.session_state.embeddings is not None:
+            if st.button("🗑️ Clear Embeddings"):
+                try:
+                    os.remove("embeddings_cache.npy")
+                    os.remove("embeddings_metadata.json")
+                except:
+                    pass
+                st.session_state.embeddings = None
+                st.session_state.embeddings_metadata = None
+                st.session_state.use_embeddings = False
+                st.success("Embeddings cleared! App will use text search.")
+                st.rerun()
     
     # Display chat messages
     for message in st.session_state.messages:
@@ -516,15 +721,32 @@ def main():
     user_input = st.chat_input("Ask your question about DLD services...")
     
     if user_input:
+        print(f"[DEBUG] User input received: '{user_input}'")
+        
         # Add user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         
         with st.spinner("Finding answer..."):
-            # Search for relevant FAQs with detailed tracking
-            search_results, search_stats = detailed_search(user_input, st.session_state.faq_data, selected_topic)
+            # Choose search method
+            if st.session_state.use_embeddings and st.session_state.embeddings is not None:
+                print("[DEBUG] Using semantic search with embeddings")
+                search_results = semantic_search_with_embeddings(
+                    user_input, 
+                    st.session_state.faq_data, 
+                    st.session_state.embeddings
+                )
+                search_method = "Semantic Search (AI)"
+            else:
+                print("[DEBUG] Using text-based search")
+                search_results = text_based_search(
+                    user_input, 
+                    st.session_state.faq_data, 
+                    selected_topic
+                )
+                search_method = "Text Search"
             
-            # Generate response with stats
-            response, generation_stats = generate_enhanced_response(user_input, search_results, st.session_state.debug_mode)
+            # Generate response
+            response = generate_response(user_input, search_results, search_method)
             
             # Create source information
             sources = ""
@@ -535,41 +757,33 @@ def main():
                     result = search_results[0]
                     sources = f"📚 **Source**: {result['service']} | **File**: {result['source_file']}\n"
                     sources += f"**Question**: {result['question']}\n"
-                    sources += f"**Relevance Score**: {result['total_score']}/100"
+                    sources += f"**Method**: {search_method}\n"
+                    sources += f"**Confidence**: {result['similarity_score']:.3f}"
                 else:
-                    sources = f"📚 **Sources**: Based on {len(search_results)} FAQ items\n"
+                    sources = f"📚 **Sources**: {len(search_results)} results from {search_method}\n"
                     for i, result in enumerate(search_results):
-                        sources += f"{i+1}. {result['service']} (Score: {result['total_score']}) | {result['source_file']}\n"
+                        sources += f"{i+1}. {result['service']} (Confidence: {result['similarity_score']:.3f})\n"
                 
                 # Debug information
                 if st.session_state.debug_mode:
-                    debug_info = f"🔍 **Search Stats**:\n"
-                    debug_info += f"• Query: '{search_stats['query']}'\n"
-                    debug_info += f"• Search time: {search_stats['search_time']:.3f}s\n"
-                    debug_info += f"• Documents searched: {search_stats['total_documents_searched']}\n"
-                    debug_info += f"• Results found: {search_stats['results_found']}\n"
-                    debug_info += f"• Top score: {search_stats['top_score']}/100\n"
-                    debug_info += f"• Topic filter: {search_stats['topic_filter']}\n\n"
-                    
-                    debug_info += f"🤖 **Generation Stats**:\n"
-                    debug_info += f"• Method: {generation_stats['method']}\n"
-                    debug_info += f"• Generation time: {generation_stats['generation_time']:.3f}s\n"
-                    debug_info += f"• OpenAI used: {generation_stats['openai_used']}\n"
+                    debug_info = f"🔍 **Search Details**:\n"
+                    debug_info += f"• Method: {search_method}\n"
+                    debug_info += f"• Query: '{user_input}'\n"
+                    debug_info += f"• Results found: {len(search_results)}\n"
+                    debug_info += f"• Topic filter: {selected_topic}\n"
+                    debug_info += f"• Embeddings available: {'Yes' if st.session_state.embeddings is not None else 'No'}\n\n"
                     
                     if search_results:
-                        debug_info += f"\n📊 **Top Result Scoring**:\n"
+                        debug_info += f"📊 **Top Result Details**:\n"
                         top_result = search_results[0]
-                        scoring = top_result['scoring_details']
-                        debug_info += f"• Exact phrase match: {scoring['exact_phrase']} points\n"
-                        debug_info += f"• Word overlap: {scoring['word_overlap']} points\n"
-                        debug_info += f"• Keyword matches: {scoring['keyword_matches']} points\n"
-                        debug_info += f"• Question patterns: {scoring['question_patterns']} points\n"
-                        debug_info += f"• **Total**: {top_result['total_score']} points\n"
-                        
-                        if top_result['matched_keywords']:
-                            debug_info += f"• Matched keywords: {', '.join(top_result['matched_keywords'])}\n"
-                        if top_result['common_words']:
-                            debug_info += f"• Common words: {', '.join(top_result['common_words'])}\n"
+                        debug_info += f"• Service: {top_result['service']}\n"
+                        debug_info += f"• Source file: {top_result['source_file']}\n"
+                        debug_info += f"• Search method: {top_result['method']}\n"
+                        debug_info += f"• Confidence score: {top_result['similarity_score']:.3f}\n"
+                        debug_info += f"• Rank: {top_result['rank']}\n"
+                        debug_info += f"• Question: {top_result['question'][:100]}...\n"
+            
+            print(f"[DEBUG] Response generated, adding to chat history")
             
             # Add bot response
             st.session_state.messages.append({
