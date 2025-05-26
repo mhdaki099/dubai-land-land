@@ -660,43 +660,6 @@ def main():
         st.markdown('<div class="sidebar-header">FAQ Data</div>', unsafe_allow_html=True)
         if not st.session_state.faq_data.empty:
             st.info(f"📚 {len(st.session_state.faq_data)} FAQ items across {len(st.session_state.topics)-1} topics")
-            
-            # ADD DEBUG INFO FOR FAILED FILES
-            if st.session_state.debug_mode:
-                # Try to load and show Excel file processing stats
-                data_dir = "data"
-                if os.path.exists(data_dir):
-                    excel_files = [f for f in os.listdir(data_dir) if f.endswith('.xlsx')]
-                    
-                    with st.expander("📊 Excel Files Debug Info"):
-                        st.write(f"**Total Excel files found**: {len(excel_files)}")
-                        st.write("**Files in data directory:**")
-                        
-                        failed_files = []
-                        for i, filename in enumerate(excel_files):
-                            file_path = os.path.join(data_dir, filename)
-                            try:
-                                # Quick check if file can be read
-                                temp_df = pd.read_excel(file_path, header=1)
-                                
-                                # Check for required columns
-                                has_question = any('question' in str(col).lower() and 'eng' in str(col).lower() for col in temp_df.columns)
-                                has_answer = any('answer' in str(col).lower() and 'eng' in str(col).lower() for col in temp_df.columns)
-                                
-                                if has_question and has_answer:
-                                    st.success(f"✅ {filename} - OK")
-                                else:
-                                    st.error(f"❌ {filename} - Missing required columns")
-                                    failed_files.append(f"{filename}: Missing question/answer columns")
-                                    st.write(f"   Available columns: {list(temp_df.columns)}")
-                            except Exception as e:
-                                st.error(f"❌ {filename} - Error: {str(e)}")
-                                failed_files.append(f"{filename}: {str(e)}")
-                        
-                        if failed_files:
-                            st.markdown("### ❌ Failed Files Report:")
-                            for failed in failed_files:
-                                st.write(f"• {failed}")
         else:
             st.error("❌ No FAQ data loaded")
             st.info("Please run the data processor script first to extract FAQ data from Excel files.")
