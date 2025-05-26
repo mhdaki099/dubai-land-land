@@ -703,7 +703,7 @@ def main():
             st.markdown('<div class="embedding-status embedding-enabled">✅ Semantic Search Active</div>', unsafe_allow_html=True)
             st.write(f"📊 {len(st.session_state.embeddings)} embeddings ready")
             if st.session_state.embeddings_metadata:
-                st.write(f"🤖 Model: {st.session_state.embeddings_metadata.get('model', 'unknown')}")
+                # st.write(f"🤖 Model: {st.session_state.embeddings_metadata.get('model', 'unknown')}")
             
             use_semantic = st.radio(
                 "Search method:",
